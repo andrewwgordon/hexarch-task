@@ -1,4 +1,4 @@
-[![CI](https://github.com/andrewwgordon/hexarch-task/actions/workflows/ci.yml/badge.svg)](https://github.com/andrewwgordon/hexarch-task/actions/workflows/ci.yml)
+[![CI](https://github.com/andrewwgordon/hexarch-task/actions/workflows/ci.yml/badge.svg?event=push)](https://github.com/andrewwgordon/hexarch-task/actions/workflows/ci.yml)
 # Hexagonal Task Manager (`hexarch`)
 
 A **task management application** written in Go, built around a
