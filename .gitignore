@@ -29,4 +29,14 @@ go.work.sum
 
 # Editor/IDE
 # .idea/
-# .vscode/
+.vscode/
+
+# Agents
+.agents/
+
+# Exe
+hexarch
+
+# SQLite database
+tasks.db
+

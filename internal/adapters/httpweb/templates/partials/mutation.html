@@ -1,0 +1,14 @@
+{{ define "partials/mutation.html" }}
+<hx-partial hx-target="#task-list" hx-swap="innerHTML">
+{{ template "partials/task_list.html" . }}
+</hx-partial>
+<hx-partial hx-target="#stats" hx-swap="innerHTML">
+{{ template "partials/stats.html" . }}
+</hx-partial>
+<hx-partial hx-target="#toast" hx-swap="afterbegin">
+  <div class="alert alert-success shadow cursor-pointer"
+       hx-get="/app/partials/empty"
+       hx-trigger="load delay:4000ms, click"
+       hx-swap="outerHTML">{{ .Toast }}</div>
+</hx-partial>
+{{ end }}

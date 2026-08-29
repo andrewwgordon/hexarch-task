@@ -1,0 +1,15 @@
+{{ define "partials/modal_delete.html" }}
+<h3 class="text-lg font-bold mb-2">Delete task?</h3>
+<p class="text-base-content/70 mb-4">This will permanently delete: <span class="font-semibold">{{ .Task.Title }}</span></p>
+<div id="modal-delete-error"></div>
+<form method="post" action="/app/tasks/{{ .Task.ID }}"
+      hx-delete="/app/tasks/{{ .Task.ID }}"
+      hx-target="this"
+      hx-swap="none"
+      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <div class="modal-action">
+    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-delete').close()">Cancel</button>
+    <button type="submit" class="btn btn-error">Delete</button>
+  </div>
+</form>
+{{ end }}

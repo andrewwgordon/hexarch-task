@@ -1,0 +1,42 @@
+{{ define "partials/modal_edit.html" }}
+<h3 class="text-lg font-bold mb-4">Edit task</h3>
+<div id="modal-edit-error"></div>
+<form method="post" action="/app/tasks/{{ .Task.ID }}"
+      hx-patch="/app/tasks/{{ .Task.ID }}"
+      hx-target="this"
+      hx-swap="none"
+      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <fieldset class="fieldset">
+    <legend class="fieldset-legend">Update</legend>
+
+    <label class="label">Title</label>
+    <input type="text" name="title" class="input input-md w-full" value="{{ .Task.Title }}" required />
+    <p class="label">Task title (required)</p>
+
+    <label class="label">Priority</label>
+    <select name="priority" class="select w-full">
+      <option value="0" {{ if eq .Task.Priority 0 }}selected{{ end }}>0 – lowest</option>
+      <option value="1" {{ if eq .Task.Priority 1 }}selected{{ end }}>1</option>
+      <option value="2" {{ if eq .Task.Priority 2 }}selected{{ end }}>2</option>
+      <option value="3" {{ if eq .Task.Priority 3 }}selected{{ end }}>3</option>
+      <option value="4" {{ if eq .Task.Priority 4 }}selected{{ end }}>4</option>
+      <option value="5" {{ if eq .Task.Priority 5 }}selected{{ end }}>5 – highest</option>
+    </select>
+
+    <label class="label">Deadline</label>
+    <input type="date" name="deadline" class="input input-md w-full" value="{{ .Task.DeadlineStr }}" />
+
+    <label class="label cursor-pointer gap-2 mt-2">
+      <input type="checkbox" name="clear_deadline" class="checkbox checkbox-sm" />
+      <span>Clear deadline</span>
+    </label>
+  </fieldset>
+
+  <div class="modal-action">
+    <button type="submit" class="btn btn-primary btn-block">Save</button>
+  </div>
+  <div class="modal-action">
+    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-edit').close()">Cancel</button>
+  </div>
+</form>
+{{ end }}

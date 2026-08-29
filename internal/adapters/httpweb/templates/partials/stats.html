@@ -1,0 +1,34 @@
+{{ define "partials/stats.html" }}
+{{ $s := .Stats }}
+<div class="stats stats-vertical sm:stats-horizontal w-full shadow">
+  <div class="stat">
+    <div class="stat-figure">
+      <div class="radial-progress text-primary" style="--value:{{ $s.PercentDone }};" role="progressbar" aria-valuenow="{{ $s.PercentDone }}" aria-label="Done">{{ $s.PercentDone }}%</div>
+    </div>
+    <div class="stat-title">Done</div>
+    <div class="stat-value">{{ $s.Done }}</div>
+    <div class="stat-desc">of {{ $s.Total }} total</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Total</div>
+    <div class="stat-value">{{ $s.Total }}</div>
+    <a class="stat-desc link link-hover" href="/app/">All</a>
+  </div>
+  <div class="stat">
+    <div class="stat-title">To do</div>
+    <div class="stat-value {{ if eq $s.ActiveStatus "todo" }}text-primary{{ end }}"><a class="link link-hover" href="/app/?status=todo" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"status":"todo"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.Todo }}</a></div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">In progress</div>
+    <div class="stat-value {{ if eq $s.ActiveStatus "in_progress" }}text-primary{{ end }}"><a class="link link-hover" href="/app/?status=in_progress" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"status":"in_progress"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.InProgress }}</a></div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Done</div>
+    <div class="stat-value {{ if eq $s.ActiveStatus "done" }}text-primary{{ end }}"><a class="link link-hover" href="/app/?status=done" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"status":"done"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.Done }}</a></div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Archived</div>
+    <div class="stat-value {{ if eq $s.ActiveStatus "archived" }}text-primary{{ end }}"><a class="link link-hover" href="/app/?status=archived" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"status":"archived"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.Archived }}</a></div>
+  </div>
+</div>
+{{ end }}

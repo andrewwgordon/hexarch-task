@@ -1,0 +1,41 @@
+{{ define "partials/modal_create.html" }}
+<h3 class="text-lg font-bold mb-4">New task</h3>
+<div id="modal-create-error"></div>
+<form method="post" action="/app/tasks"
+      hx-post="/app/tasks"
+      hx-target="this"
+      hx-swap="none"
+      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <fieldset class="fieldset">
+    <legend class="fieldset-legend">Details</legend>
+
+    <label class="label">Title</label>
+    <input type="text" name="title" class="input input-md w-full" required />
+    <p class="label">Task title (required)</p>
+
+    <label class="label">Description</label>
+    <textarea name="description" class="textarea textarea-md w-full" rows="3"></textarea>
+
+    <label class="label">Priority</label>
+    <select name="priority" class="select w-full">
+      <option value="0">0 – lowest</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5 – highest</option>
+    </select>
+
+    <label class="label">Deadline</label>
+    <input type="date" name="deadline" class="input input-md w-full" />
+    <p class="label">Optional due date</p>
+  </fieldset>
+
+  <div class="modal-action">
+    <button type="submit" class="btn btn-primary btn-block">Create</button>
+  </div>
+  <div class="modal-action">
+    <button type="button" class="btn btn-ghost" onclick="modal_create.close()">Cancel</button>
+  </div>
+</form>
+{{ end }}

@@ -1,0 +1,58 @@
+{{ define "partials/task_list.html" }}
+{{ $page := .List }}
+{{ if $page.ShowEmpty }}
+<div class="card bg-base-100 shadow p-8 text-center">
+  <div class="card-body items-center">
+    <h2 class="card-title">No tasks yet</h2>
+    <p class="text-base-content/70">Create your first task to get started.</p>
+    <div class="card-actions justify-center mt-2">
+      <button type="button" class="btn btn-primary" onclick="modal_create.showModal()">+ New Task</button>
+    </div>
+  </div>
+</div>
+{{ else if $page.NoMatch }}
+<div class="alert alert-info shadow">
+  <span>No tasks match the current filters.</span>
+  <a href="/app/" class="btn btn-sm btn-ghost">Clear filters</a>
+</div>
+{{ else }}
+<div class="card bg-base-100 shadow">
+  <ul class="list">
+    {{ range $page.Tasks }}
+      {{ template "partials/task_row.html" . }}
+    {{ end }}
+  </ul>
+</div>
+
+<!-- Pagination -->
+<div class="flex justify-center mt-4">
+  <div class="join">
+    {{ if $page.HasPrev }}
+    <button class="btn join-item btn-sm"
+            hx-get="/app/tasks"
+            hx-include="#filter-form"
+            hx-vals='{"offset":"{{ $page.PrevOffset }}"}'
+            hx-target="#task-list"
+            hx-swap="innerHTML"
+            hx-push-url="true">« Prev</button>
+    {{ else }}
+    <button class="btn join-item btn-sm btn-disabled" disabled>« Prev</button>
+    {{ end }}
+
+    <button class="btn join-item btn-sm btn-active">Page {{ $page.Page }}</button>
+
+    {{ if $page.HasNext }}
+    <button class="btn join-item btn-sm"
+            hx-get="/app/tasks"
+            hx-include="#filter-form"
+            hx-vals='{"offset":"{{ $page.NextOffset }}"}'
+            hx-target="#task-list"
+            hx-swap="innerHTML"
+            hx-push-url="true">Next »</button>
+    {{ else }}
+    <button class="btn join-item btn-sm btn-disabled" disabled>Next »</button>
+    {{ end }}
+  </div>
+</div>
+{{ end }}
+{{ end }}
