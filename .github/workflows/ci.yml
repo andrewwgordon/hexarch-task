@@ -76,7 +76,10 @@ jobs:
         # race detector and coverage both work without a C toolchain. The
         # integration test boots its own SQLite-backed server, so no external
         # services are needed.
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+        # Quote the -coverprofile flag: Windows runners execute steps with
+        # pwsh, which otherwise splits "coverage.out" into "coverage" and a
+        # stray ".out" package argument, failing the run.
+        run: go test -race -covermode=atomic "-coverprofile=coverage.out" ./...
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
