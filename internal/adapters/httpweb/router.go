@@ -8,19 +8,29 @@
 //   - NewRouter
 //
 // Private:
-//   - templateDir, loadTemplates
+//   - loadTemplates
+//
+// Embedded assets:
+//   - templateFS
 package httpweb
 
 import (
+	"embed"
 	"fmt"
 	"html/template"
-	"path/filepath"
-	"runtime"
+	"io/fs"
 
 	"github.com/gin-gonic/gin"
 
 	"hexarch/internal/application"
 )
+
+// templateFS embeds the HTML templates into the executable so the binary is
+// self-contained and no longer depends on the templates directory existing
+// relative to the source tree at runtime.
+//
+//go:embed templates
+var templateFS embed.FS
 
 // NewRouter wires the web routes onto a new Gin engine under the /app group.
 // It is exported so external test packages (./test) can build and drive the
@@ -55,28 +65,20 @@ func NewRouter(svc application.TaskService) (*gin.Engine, error) {
 	return r, nil
 }
 
-// templateDir resolves the templates directory relative to this package's
-// source location, so it works both when the binary runs from the repo root
-// and when tests run from ./test (where the working directory differs).
-func templateDir() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return "internal/adapters/httpweb/templates"
-	}
-	return filepath.Join(filepath.Dir(file), "templates")
-}
-
-// loadTemplates parses the full page shell and all partial fragments. The
-// stdlib glob does not recurse, so both directories are parsed explicitly.
+// loadTemplates parses the full page shell and all partial fragments from the
+// embedded filesystem. The stdlib glob does not recurse, so both directories
+// are parsed explicitly. fs.Sub strips the "templates" root so template names
+// match what the handlers render ("index.html", "partials/task_list.html", ...).
 func loadTemplates() (*template.Template, error) {
-	dir := templateDir()
+	dir, err := fs.Sub(templateFS, "templates")
+	if err != nil {
+		return nil, fmt.Errorf("open embedded templates: %w", err)
+	}
 	tmpl := template.New("")
-	shell := filepath.Join(dir, "*.html")
-	if _, err := tmpl.ParseGlob(shell); err != nil {
+	if _, err := tmpl.ParseFS(dir, "*.html"); err != nil {
 		return nil, fmt.Errorf("parse shell templates: %w", err)
 	}
-	partials := filepath.Join(dir, "partials", "*.html")
-	if _, err := tmpl.ParseGlob(partials); err != nil {
+	if _, err := tmpl.ParseFS(dir, "partials/*.html"); err != nil {
 		return nil, fmt.Errorf("parse partial templates: %w", err)
 	}
 	return tmpl, nil
