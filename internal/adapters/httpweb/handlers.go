@@ -19,6 +19,7 @@ package httpweb
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,17 +27,86 @@ import (
 	"hexarch/internal/adapters/httpconv"
 	"hexarch/internal/application"
 	"hexarch/internal/domain"
+	"hexarch/internal/repository"
 )
 
-// handlers bundles the service and implements the /app route handlers.
-// Each method corresponds to one route registered in router.go.
+// handlers bundles the service and session manager and implements the /app
+// route handlers. Each method corresponds to one route registered in
+// router.go.
 type handlers struct {
 	svc application.TaskService
+	sm  *sessionManager
 }
 
 // newHandlers builds the handler set for the given service.
-func newHandlers(svc application.TaskService) *handlers {
-	return &handlers{svc: svc}
+func newHandlers(svc application.TaskService, sm *sessionManager) *handlers {
+	return &handlers{svc: svc, sm: sm}
+}
+
+// ---- login / logout (phase 10 of docs/auth-plan.md) ----
+
+// loginForm handles GET /app/login: the login page. Already-authenticated
+// visitors are redirected to the task page.
+func (h *handlers) loginForm(c *gin.Context) {
+	if value, err := c.Cookie(sessionCookieName); err == nil && value != "" {
+		if uid, ok := h.sm.verify(value, time.Now()); ok {
+			if _, uerr := h.svc.UserByID(c.Request.Context(), uid); uerr == nil {
+				c.Redirect(http.StatusSeeOther, "/app/")
+				return
+			}
+		}
+	}
+	markVary(c)
+	c.HTML(http.StatusOK, "login.html", gin.H{
+		"CSRF": ensureCSRFToken(c),
+		"Next": sanitizeNext(c.Query("next")),
+	})
+}
+
+// login handles POST /app/login: verifies CSRF, calls AuthUser, issues the
+// session cookie, and redirects (PRG) to the requested page or /app/.
+func (h *handlers) login(c *gin.Context) {
+	if !verifyCSRF(c) {
+		c.HTML(http.StatusForbidden, "login.html", gin.H{
+			"CSRF": ensureCSRFToken(c),
+			"Next": sanitizeNext(c.PostForm("next")),
+		})
+		return
+	}
+	user, err := h.svc.AuthUser(c.Request.Context(), c.PostForm("email"), c.PostForm("password"))
+	if err != nil {
+		// Same generic message for unknown email and wrong password (NFR-2).
+		markVary(c)
+		c.HTML(http.StatusUnauthorized, "login.html", gin.H{
+			"CSRF":    ensureCSRFToken(c),
+			"Next":    sanitizeNext(c.PostForm("next")),
+			"message": "invalid email or password",
+		})
+		return
+	}
+	c.SetCookie(sessionCookieName, h.sm.issue(user.ID(), time.Now()),
+		int(sessionTTL.Seconds()), "/", "", secureCookie(c), true)
+	c.Redirect(http.StatusSeeOther, sanitizeNext(c.PostForm("next")))
+}
+
+// logout handles GET and POST /app/logout: clears the session cookie and
+// returns to the login page. (POST is CSRF-protected; GET is permitted as a
+// convenience link.)
+func (h *handlers) logout(c *gin.Context) {
+	if c.Request.Method == http.MethodPost && !verifyCSRF(c) {
+		return
+	}
+	c.SetCookie(sessionCookieName, "", -1, "/", "", secureCookie(c), true)
+	c.Redirect(http.StatusSeeOther, "/app/login")
+}
+
+// sanitizeNext whitelists a redirect target: same-origin paths only,
+// defaulting to /app/.
+func sanitizeNext(next string) string {
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return "/app/"
+	}
+	return next
 }
 
 // isHX reports whether the request is an HTMX fragment request.
@@ -49,9 +119,22 @@ func markVary(c *gin.Context) {
 	c.Header("Vary", "HX-Request")
 }
 
+// scopeFilter returns the task filter for list/stats requests in the web UI:
+// regular users are always scoped to their own tasks; admins see every
+// user's tasks (the web UI has no cross-user inspector — spec docs/auth.md
+// §3.4).
+func scopeFilter(c *gin.Context, f repository.TaskFilter) repository.TaskFilter {
+	user := currentUser(c)
+	if !user.IsAdmin() {
+		uid := user.ID()
+		f.UserID = &uid
+	}
+	return f
+}
+
 // pageData gathers the stats needed by both the list and stats views.
 func (h *handlers) pageData(c *gin.Context) (application.TaskStats, error) {
-	return h.svc.Stats(c.Request.Context())
+	return h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
 }
 
 // ---- index (full page shell) ----
@@ -69,7 +152,7 @@ func (h *handlers) index(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	stats, err := h.svc.Stats(c.Request.Context())
+	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -78,6 +161,8 @@ func (h *handlers) index(c *gin.Context) {
 	c.HTML(http.StatusOK, "index.html", gin.H{
 		"List":  toListPage(tasks, filter, len(tasks), total),
 		"Stats": toStatsView(stats, filter, total > 0),
+		"User":  toUserView(currentUser(c)),
+		"CSRF":  ensureCSRFToken(c),
 	})
 }
 
@@ -87,11 +172,12 @@ func (h *handlers) listAndTotal(c *gin.Context) ([]domain.Task, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	filter = scopeFilter(c, filter)
 	tasks, err := h.svc.ListTasks(c.Request.Context(), filter)
 	if err != nil {
 		return nil, 0, err
 	}
-	total, err := h.svc.Stats(c.Request.Context())
+	total, err := h.svc.Stats(c.Request.Context(), filter)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -118,14 +204,15 @@ func (h *handlers) list(c *gin.Context) {
 // ---- FR-6: stats (fragment) ----
 
 // stats handles GET /app/stats: the stats strip fragment with per-status
-// counters and the "Done" percentage meter.
+// counters and the "Done" percentage meter, scoped to the caller's role
+// (regular users see only their own counts).
 func (h *handlers) stats(c *gin.Context) {
-	stats, err := h.svc.Stats(c.Request.Context())
+	filter, _ := filterFromQuery(c)
+	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, filter))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	filter, _ := filterFromQuery(c)
 	markVary(c)
 	c.HTML(http.StatusOK, "partials/stats.html", gin.H{
 		"Stats": toStatsView(stats, filter, stats.Total > 0),
@@ -144,6 +231,7 @@ func (h *handlers) create(c *gin.Context) {
 		return
 	}
 	task, err := h.svc.CreateTask(c.Request.Context(), application.CreateTaskInput{
+		UserID:      currentUser(c).ID(),
 		Title:       c.PostForm("title"),
 		Description: c.PostForm("description"),
 		Priority:    priority,
@@ -159,15 +247,19 @@ func (h *handlers) create(c *gin.Context) {
 // ---- FR-3: edit form fragment ----
 
 // editForm handles GET /app/tasks/:id/edit: the edit modal prefilled with
-// the current task values.
+// the current task values. Ownership is enforced by the service (FR-U4): a
+// regular user can only open the edit form for their own tasks.
 func (h *handlers) editForm(c *gin.Context) {
-	task, err := h.svc.GetTask(c.Request.Context(), domain.TaskID(c.Param("id")))
+	task, err := h.svc.GetTask(c.Request.Context(), domain.TaskID(c.Param("id")), callerOf(c))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 	markVary(c)
-	c.HTML(http.StatusOK, "partials/modal_edit.html", gin.H{"Task": toTaskView(task)})
+	c.HTML(http.StatusOK, "partials/modal_edit.html", gin.H{
+		"Task": toTaskView(task),
+		"CSRF": ensureCSRFToken(c),
+	})
 }
 
 // ---- FR-3: update ----
@@ -177,6 +269,7 @@ func (h *handlers) editForm(c *gin.Context) {
 // mutation response.
 func (h *handlers) update(c *gin.Context) {
 	id := domain.TaskID(c.Param("id"))
+	caller := callerOf(c)
 
 	var task domain.Task
 	var err error
@@ -188,7 +281,7 @@ func (h *handlers) update(c *gin.Context) {
 			writeError(c, domain.Invalid("title must not be empty"))
 			return
 		}
-		task, err = h.svc.RenameTask(c.Request.Context(), id, title)
+		task, err = h.svc.RenameTask(c.Request.Context(), id, title, caller)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -201,7 +294,7 @@ func (h *handlers) update(c *gin.Context) {
 			return
 		}
 		applied = true
-		task, err = h.svc.ChangePriority(c.Request.Context(), id, priority)
+		task, err = h.svc.ChangePriority(c.Request.Context(), id, priority, caller)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -209,7 +302,7 @@ func (h *handlers) update(c *gin.Context) {
 	}
 	if c.PostForm("clear_deadline") == "on" {
 		applied = true
-		task, err = h.svc.ClearDeadline(c.Request.Context(), id)
+		task, err = h.svc.ClearDeadline(c.Request.Context(), id, caller)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -221,7 +314,7 @@ func (h *handlers) update(c *gin.Context) {
 			writeError(c, derr)
 			return
 		}
-		task, err = h.svc.SetDeadline(c.Request.Context(), id, deadline)
+		task, err = h.svc.SetDeadline(c.Request.Context(), id, deadline, caller)
 		if err != nil {
 			writeError(c, err)
 			return
@@ -239,14 +332,14 @@ func (h *handlers) update(c *gin.Context) {
 
 // changeStatus handles POST /app/tasks/:id/status: it moves the task
 // through the domain state machine and answers with the mutation response
-// (toast carries the new status label).
+// (toast carries the new status label). Ownership is enforced (FR-U4).
 func (h *handlers) changeStatus(c *gin.Context) {
 	status, err := httpconv.ParseStatus(c.PostForm("status"))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	task, err := h.svc.ChangeStatus(c.Request.Context(), domain.TaskID(c.Param("id")), status)
+	task, err := h.svc.ChangeStatus(c.Request.Context(), domain.TaskID(c.Param("id")), status, callerOf(c))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -257,24 +350,28 @@ func (h *handlers) changeStatus(c *gin.Context) {
 // ---- FR-5: delete confirm fragment ----
 
 // deleteForm handles GET /app/tasks/:id/delete: the delete confirmation
-// modal prefilled with the task title.
+// modal prefilled with the task title. Ownership is enforced by the service
+// (FR-U4).
 func (h *handlers) deleteForm(c *gin.Context) {
-	task, err := h.svc.GetTask(c.Request.Context(), domain.TaskID(c.Param("id")))
+	task, err := h.svc.GetTask(c.Request.Context(), domain.TaskID(c.Param("id")), callerOf(c))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 	markVary(c)
-	c.HTML(http.StatusOK, "partials/modal_delete.html", gin.H{"Task": toTaskView(task)})
+	c.HTML(http.StatusOK, "partials/modal_delete.html", gin.H{
+		"Task": toTaskView(task),
+		"CSRF": ensureCSRFToken(c),
+	})
 }
 
 // ---- FR-5: delete ----
 
 // delete handles DELETE /app/tasks/:id: it removes the task and answers
-// with the mutation response.
+// with the mutation response. Ownership is enforced (FR-U4).
 func (h *handlers) delete(c *gin.Context) {
 	id := domain.TaskID(c.Param("id"))
-	if err := h.svc.DeleteTask(c.Request.Context(), id); err != nil {
+	if err := h.svc.DeleteTask(c.Request.Context(), id, callerOf(c)); err != nil {
 		writeError(c, err)
 		return
 	}
@@ -301,7 +398,7 @@ func (h *handlers) writeMutation(c *gin.Context, _ domain.Task, toast string) {
 		writeError(c, err)
 		return
 	}
-	stats, err := h.svc.Stats(c.Request.Context())
+	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -321,6 +418,12 @@ func (h *handlers) writeMutation(c *gin.Context, _ domain.Task, toast string) {
 }
 
 // ---- small helpers ----
+
+// callerOf resolves the authenticated caller identity from the DB-loaded user
+// stored by requireAuth.
+func callerOf(c *gin.Context) application.Caller {
+	return application.CallerOf(currentUser(c))
+}
 
 // optionalDeadline parses the create-form deadline, returning nil for empty
 // or invalid input (the domain treats an absent deadline as none).

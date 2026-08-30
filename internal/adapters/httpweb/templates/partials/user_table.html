@@ -1,0 +1,15 @@
+{{ define "partials/user_table.html" }}
+<table class="table table-zebra">
+  <thead>
+    <tr>
+      <th>Email</th>
+      <th>Role</th>
+      <th>ID</th>
+      <th class="text-right">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{ template "partials/user_row.html" . }}
+  </tbody>
+</table>
+{{ end }}

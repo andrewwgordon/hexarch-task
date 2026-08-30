@@ -1,0 +1,24 @@
+{{ define "partials/modal_user_delete.html" }}
+<h3 class="text-lg font-bold mb-2">Delete user?</h3>
+<p class="text-base-content/70 mb-4">
+  This will permanently delete: <span class="font-semibold">{{ .User.Email }}</span><br />
+  <span class="text-sm">All tasks owned by this user will also be deleted.</span>
+  {{ if eq .User.ID $.CurrentID }}
+  <span class="block mt-2 text-error">You cannot delete your own account.</span>
+  {{ end }}
+</p>
+<div id="modal-user-delete-error"></div>
+<form method="post" action="/app/users/{{ .User.ID }}"
+      hx-delete="/app/users/{{ .User.ID }}"
+      hx-target="this"
+      hx-swap="none"
+      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
+  <div class="modal-action">
+    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-user-delete').close()">Cancel</button>
+    {{ if ne .User.ID $.CurrentID }}
+    <button type="submit" class="btn btn-error">Delete</button>
+    {{ end }}
+  </div>
+</form>
+{{ end }}

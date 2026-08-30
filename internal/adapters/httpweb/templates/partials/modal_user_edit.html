@@ -1,0 +1,36 @@
+{{ define "partials/modal_user_edit.html" }}
+<h3 class="text-lg font-bold mb-4">Edit user</h3>
+<div id="modal-user-edit-error"></div>
+<form method="post" action="/app/users/{{ .User.ID }}"
+      hx-patch="/app/users/{{ .User.ID }}"
+      hx-target="this"
+      hx-swap="none"
+      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
+
+  <div class="flex flex-col gap-3">
+    <label class="form-control">
+      <span class="label-text mb-1">Email</span>
+      <input type="email" name="email" value="{{ .User.Email }}"
+             class="input input-bordered w-full" required />
+    </label>
+
+    <label class="form-control">
+      <span class="label-text mb-1">New Password <span class="opacity-60">(leave empty to keep current)</span></span>
+      <input type="password" name="password" placeholder="unchanged"
+             class="input input-bordered w-full" />
+    </label>
+
+    <label class="label cursor-pointer justify-start gap-3">
+      <input type="checkbox" name="isadmin" class="toggle toggle-primary"
+             {{ if .User.IsAdmin }}checked{{ end }} />
+      <span class="label-text">Administrator</span>
+    </label>
+  </div>
+
+  <div class="modal-action">
+    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-user-edit').close()">Cancel</button>
+    <button type="submit" class="btn btn-primary">Save</button>
+  </div>
+</form>
+{{ end }}

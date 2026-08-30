@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in — To Do</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+<body class="bg-base-200 min-h-screen text-base-content flex flex-col">
+  <div class="max-w-5xl mx-auto w-full p-4">
+
+    <!-- Navbar -->
+    <div class="navbar bg-base-100 rounded-box shadow px-4 mb-4">
+      <div class="navbar-start">
+        <a class="text-lg font-bold text-primary" href="/app/">To Do</a>
+      </div>
+      <div class="navbar-end">
+        {{ template "partials/theme_toggle.html" . }}
+      </div>
+    </div>
+
+  </div>
+
+  <div class="flex-1 w-full flex items-center justify-center px-4 pb-4">
+    <div class="w-full max-w-sm">
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body">
+          <h1 class="card-title text-primary justify-center mb-2">To Do</h1>
+
+          {{ if .message }}
+            {{ template "partials/error_alert.html" . }}
+          {{ end }}
+
+          <form method="post" action="/app/login" class="flex flex-col gap-3">
+            <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
+            <input type="hidden" name="next" value="{{ .Next }}" />
+
+            <label class="form-control">
+              <span class="label-text mb-1">Email</span>
+              <input type="email" name="email" placeholder="you@example.com"
+                     class="input input-bordered w-full" required autofocus autocomplete="username" />
+            </label>
+
+            <label class="form-control">
+              <span class="label-text mb-1">Password</span>
+              <input type="password" name="password" placeholder="••••••••"
+                     class="input input-bordered w-full" required autocomplete="current-password" />
+            </label>
+
+            <button type="submit" class="btn btn-primary mt-2">Sign in</button>
+          </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

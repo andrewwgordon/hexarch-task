@@ -32,9 +32,14 @@ func now(t time.Time) time.Time {
 
 // fixed times are 1+ minutes apart so that the Unix-second storage used by the
 // SQL backends preserves ordering unambiguously.
+// owner is the task owner used by the task contract fixtures. Repository()
+// seeds it as a real user (fixtureOwner) before running the task subtests,
+// because SQL backends enforce the tasks.user_id foreign key.
+var owner = domain.UserID("u-owner")
+
 func mustTask(t *testing.T, id domain.TaskID, title string, priority int, at time.Time) domain.Task {
 	t.Helper()
-	task, err := domain.NewTask(id, title, "", priority, nil, now(at))
+	task, err := domain.NewTask(id, owner, title, "", priority, nil, now(at))
 	if err != nil {
 		t.Fatalf("NewTask(%s): %v", id, err)
 	}
@@ -92,13 +97,19 @@ func requireIDs(t *testing.T, got []domain.Task, want ...domain.TaskID) {
 
 // Repository runs the complete port contract against a fresh, empty
 // repository produced by newRepo. Each subtest receives its own repository.
+// Every task subtest's repo first gets the fixture owner user created, so
+// SQL backends' tasks.user_id foreign key accepts the fixture tasks.
 func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskRepository) {
 	t.Helper()
 
 	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 
+	t.Run("Users", func(t *testing.T) {
+		Users(t, newRepo)
+	})
+
 	t.Run("CreateAndByID", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		want := mustTask(t, "t1", "First task", 3, base)
 		if err := repo.Create(ctx, want); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -111,7 +122,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("CreateConflict", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		want := mustTask(t, "t1", "dup", 1, base)
 		if err := repo.Create(ctx, want); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -121,15 +132,15 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ByIDNotFound", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		_, err := repo.ByID(ctx, "missing")
 		assertKind(t, err, domain.KindNotFound)
 	})
 
 	t.Run("DeadlineRoundTrip", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		deadline := base.Add(72 * time.Hour)
-		task, err := domain.NewTask("d1", "dated", "", 2, &deadline, now(base))
+		task, err := domain.NewTask("d1", owner, "dated", "", 2, &deadline, now(base))
 		if err != nil {
 			t.Fatalf("NewTask: %v", err)
 		}
@@ -144,9 +155,9 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ClearDeadlineRoundTrip", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		deadline := base.Add(24 * time.Hour)
-		task, err := domain.NewTask("c1", "cleared", "", 2, &deadline, now(base))
+		task, err := domain.NewTask("c1", owner, "cleared", "", 2, &deadline, now(base))
 		if err != nil {
 			t.Fatalf("NewTask: %v", err)
 		}
@@ -171,7 +182,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ListOrdering", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		tasks := []domain.Task{
 			mustTask(t, "a", "low", 1, base.Add(4*time.Minute)),
 			mustTask(t, "b", "high", 5, base.Add(2*time.Minute)),
@@ -193,7 +204,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ListStatusFilter", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		todo := mustTask(t, "s1", "todo", 1, base)
 		if err := repo.Create(ctx, todo); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -215,7 +226,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ListSearchCaseInsensitive", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		if err := repo.Create(ctx, mustTask(t, "m1", "Write the REPORT", 1, base)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -230,7 +241,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("ListPagination", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		for i := 0; i < 6; i++ {
 			id := domain.TaskID(string(rune('p' + i)))
 			if err := repo.Create(ctx, mustTask(t, id, "page", 1, base.Add(time.Duration(i)*time.Minute))); err != nil {
@@ -246,7 +257,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("CountAndCountByStatus", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		todo := mustTask(t, "n1", "one", 1, base)
 		if err := repo.Create(ctx, todo); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -262,14 +273,14 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 		if err := repo.Create(ctx, inprog); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		total, err := repo.Count(ctx)
+		total, err := repo.Count(ctx, repository.TaskFilter{})
 		if err != nil {
 			t.Fatalf("Count: %v", err)
 		}
 		if total != 3 {
 			t.Fatalf("Count = %d, want 3", total)
 		}
-		todoN, err := repo.CountByStatus(ctx, domain.StatusTodo)
+		todoN, err := repo.CountByStatus(ctx, domain.StatusTodo, repository.TaskFilter{})
 		if err != nil {
 			t.Fatalf("CountByStatus: %v", err)
 		}
@@ -279,7 +290,7 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("UpdatePersistsFields", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		task := mustTask(t, "u1", "original", 1, base)
 		if err := repo.Create(ctx, task); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -307,14 +318,14 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 	})
 
 	t.Run("UpdateNotFound", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		missing := mustTask(t, "gone", "nope", 1, base)
 		err := repo.Update(ctx, missing)
 		assertKind(t, err, domain.KindNotFound)
 	})
 
 	t.Run("DeleteAndDeleteNotFound", func(t *testing.T) {
-		repo := newRepo(t)
+		repo := newRepoWithOwner(t, newRepo)
 		task := mustTask(t, "x1", "delete me", 1, base)
 		if err := repo.Create(ctx, task); err != nil {
 			t.Fatalf("Create: %v", err)

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Management — To Do</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0"
+          integrity="sha384-BvJpBiO8Kh31EqtJe5DRIeWrHWnCGkwytKs9NKFi86Hhw96dEqdEMzZDeK9iEGTc"
+          crossorigin="anonymous"></script>
+</head>
+<body class="bg-base-200 min-h-screen text-base-content"
+      hx-headers:inherited='{"X-CSRF-Token": "{{ .CSRF }}"}'>
+  <div class="max-w-5xl mx-auto p-4">
+
+    <!-- Navbar -->
+    <div class="navbar bg-base-100 rounded-box shadow px-4 mb-4">
+      <div class="navbar-start">
+        <a class="text-lg font-bold text-primary" href="/app/">To Do</a>
+        <span class="ml-4 text-sm font-semibold opacity-80">User Management</span>
+      </div>
+      <div class="navbar-end">
+        <span class="text-sm opacity-70 mr-2">{{ .CurrentUser }}</span>
+        <a class="btn btn-sm btn-ghost" href="/app/logout">Logout</a> 
+        {{ template "partials/theme_toggle.html" . }}
+        <button type="button" class="btn btn-primary btn-sm" onclick="document.getElementById('modal-user-create').showModal()">+ New User</button>
+      </div>
+    </div>
+
+    <!-- User list -->
+    <div id="user-list" class="card bg-base-100 shadow p-3">
+      {{ template "partials/user_table.html" . }}
+    </div>
+
+    <!-- Create modal shell -->
+    <dialog id="modal-user-create" class="modal">
+      <div class="modal-box" id="user-create-modal-box">
+        {{ template "partials/modal_user_create.html" . }}
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    <!-- Edit modal shell (content loaded via HTMX) -->
+    <dialog id="modal-user-edit" class="modal">
+      <div class="modal-box" id="user-edit-modal-box"></div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    <!-- Delete modal shell (content loaded via HTMX) -->
+    <dialog id="modal-user-delete" class="modal">
+      <div class="modal-box" id="user-delete-modal-box"></div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    <!-- Toast -->
+    <div id="toast" class="toast toast-end"></div>
+  </div>
+</body>
+</html>

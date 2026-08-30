@@ -38,6 +38,14 @@ func newWebEngine(t *testing.T) *gin.Engine {
 	return r
 }
 
+// newWebSession returns an engine plus an authenticated client (the seeded
+// bootstrap admin).
+func newWebSession(t *testing.T) (*gin.Engine, *webClient) {
+	t.Helper()
+	r := newWebEngine(t)
+	return r, newLoggedInClient(t, r, "admin@email.com", "admin")
+}
+
 // newTestService builds a TaskService with the given repo and deterministic
 // ID/clock sources.
 func newTestService(repo repository.TaskRepository) application.TaskService {
@@ -53,9 +61,60 @@ func newTestService(repo repository.TaskRepository) application.TaskService {
 	)
 }
 
+// webClient carries the cookies (session + CSRF) of one authenticated
+// browser session across requests.
+type webClient struct {
+	r       *gin.Engine
+	csrf    string
+	email   string
+	cookies map[string]string
+}
+
+// newLoggedInClient performs the full login dance against /app/login and
+// returns a client holding the session + CSRF cookies.
+func newLoggedInClient(t *testing.T, r *gin.Engine, email, password string) *webClient {
+	t.Helper()
+	// 1. GET the login page to obtain the CSRF cookie.
+	jar := map[string]string{}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/app/login", nil)
+	r.ServeHTTP(w, req)
+	for _, ck := range w.Result().Cookies() {
+		jar[ck.Name] = ck.Value
+	}
+	csrf := jar["hexarch_csrf"]
+	if csrf == "" {
+		t.Fatal("login page did not issue a CSRF cookie")
+	}
+	// 2. POST the credentials with the token.
+	form := url.Values{
+		"email":      {email},
+		"password":   {password},
+		"csrf_token": {csrf},
+		"next":       {"/app/"},
+	}
+	req = httptest.NewRequest("POST", "/app/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range jar {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("login status = %d, want 303; body=%s", w.Code, w.Body.String())
+	}
+	for _, ck := range w.Result().Cookies() {
+		if ck.Value != "" {
+			jar[ck.Name] = ck.Value
+		}
+	}
+	return &webClient{r: r, csrf: csrf, email: email, cookies: jar}
+}
+
 // webDo performs a request against the web engine. hx toggles the HX-Request
-// header. Form bodies are form-encoded.
-func webDo(t *testing.T, r *gin.Engine, method, path string, hx bool, form url.Values) *httptest.ResponseRecorder {
+// header. Form bodies are form-encoded. Requests carry the client's cookies
+// and CSRF token.
+func (c *webClient) do(t *testing.T, method, path string, hx bool, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	var req *http.Request
 	if len(form) > 0 {
@@ -67,26 +126,30 @@ func webDo(t *testing.T, r *gin.Engine, method, path string, hx bool, form url.V
 	if hx {
 		req.Header.Set("HX-Request", "true")
 	}
+	req.Header.Set("X-CSRF-Token", c.csrf)
+	for k, v := range c.cookies {
+		req.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
+	c.r.ServeHTTP(w, req)
 	return w
 }
 
 // seedWebTask creates a task via the web UI form endpoint with HX off.
-func seedWebTask(t *testing.T, r *gin.Engine, title string) {
+func seedWebTask(t *testing.T, c *webClient, title string) {
 	t.Helper()
 	form := url.Values{"title": {title}}
-	w := webDo(t, r, "POST", "/app/tasks", false, form)
+	w := c.do(t, "POST", "/app/tasks", false, form)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("seed %q status = %d, want 303; body=%s", title, w.Code, w.Body.String())
 	}
 }
 
 // advanceStatus drives a task through one status step via the web UI.
-func advanceStatus(t *testing.T, r *gin.Engine, id, status string) {
+func advanceStatus(t *testing.T, c *webClient, id, status string) {
 	t.Helper()
 	form := url.Values{"status": {status}}
-	w := webDo(t, r, "POST", "/app/tasks/"+id+"/status", true, form)
+	w := c.do(t, "POST", "/app/tasks/"+id+"/status", true, form)
 	if w.Code != http.StatusOK {
 		t.Fatalf("advance %s to %s status = %d; body=%s", id, status, w.Code, w.Body.String())
 	}
@@ -95,8 +158,8 @@ func advanceStatus(t *testing.T, r *gin.Engine, id, status string) {
 // --- Stage 0/1: harness + shell render -----------------------------------
 
 func TestWebIndexRenders(t *testing.T) {
-	r := newWebEngine(t)
-	w := webDo(t, r, "GET", "/app/", false, nil)
+	_, c := newWebSession(t)
+	w := c.do(t, "GET", "/app/", false, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("index status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -109,8 +172,8 @@ func TestWebIndexRenders(t *testing.T) {
 }
 
 func TestWebIndexEmptyState(t *testing.T) {
-	r := newWebEngine(t)
-	w := webDo(t, r, "GET", "/app/", false, nil)
+	_, c := newWebSession(t)
+	w := c.do(t, "GET", "/app/", false, nil)
 	body := w.Body.String()
 	if !strings.Contains(body, "No tasks yet") {
 		t.Errorf("empty-state missing from index: %s", body)
@@ -120,14 +183,14 @@ func TestWebIndexEmptyState(t *testing.T) {
 // --- Stage 3: dual render branch -----------------------------------------
 
 func TestWebFragmentsVsFullPage(t *testing.T) {
-	r := newWebEngine(t)
+	_, c := newWebSession(t)
 
-	full := webDo(t, r, "GET", "/app/tasks", false, nil)
+	full := c.do(t, "GET", "/app/tasks", false, nil)
 	if full.Code != http.StatusOK {
 		t.Fatalf("full status = %d", full.Code)
 	}
 
-	frag := webDo(t, r, "GET", "/app/tasks", true, nil)
+	frag := c.do(t, "GET", "/app/tasks", true, nil)
 	if frag.Code != http.StatusOK {
 		t.Fatalf("fragment status = %d", frag.Code)
 	}
@@ -141,9 +204,9 @@ func TestWebFragmentsVsFullPage(t *testing.T) {
 }
 
 func TestWebStatsFragment(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "a")
-	w := webDo(t, r, "GET", "/app/stats", true, nil)
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "a")
+	w := c.do(t, "GET", "/app/stats", true, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("stats status = %d", w.Code)
 	}
@@ -156,28 +219,176 @@ func TestWebStatsFragment(t *testing.T) {
 // --- FR-6: stats ----------------------------------------------------------
 
 func TestWebStatsCounters(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "a")
-	seedWebTask(t, r, "b")
-	advanceStatus(t, r, "id-001", "in_progress")
-	advanceStatus(t, r, "id-001", "done")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "a")
+	seedWebTask(t, c, "b")
+	advanceStatus(t, c, "id-001", "in_progress")
+	advanceStatus(t, c, "id-001", "done")
 
-	w := webDo(t, r, "GET", "/app/stats", true, nil)
+	w := c.do(t, "GET", "/app/stats", true, nil)
 	body := w.Body.String()
 	if !strings.Contains(body, "of 2 total") {
 		t.Errorf("stats total missing: %s", body)
 	}
 }
 
+// TestWebRegularUserSeesOnlyOwnTasksAndStats guards the ownership defect:
+// a non-admin's list and stats must be scoped to their own tasks, never the
+// bootstrap admin's.
+func TestWebRegularUserSeesOnlyOwnTasksAndStats(t *testing.T) {
+	repo := memory.NewTaskRepositoryMem()
+	svc := newTestService(repo)
+
+	// Register a regular user (CreateUser seeds the bootstrap admin first).
+	hash, err := application.HashPassword("pw", application.TestPasswordCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	regular, err := domain.NewUser("u-regular", "regular@x.com", hash, "key-regular", false)
+	if err != nil {
+		t.Fatalf("NewUser(regular): %v", err)
+	}
+	if err := repo.CreateUser(context.Background(), regular); err != nil {
+		t.Fatalf("CreateUser(regular): %v", err)
+	}
+
+	// Admin owns one task; the regular user owns another.
+	admin, err := svc.AuthUser(context.Background(), "admin@email.com", "admin")
+	if err != nil {
+		t.Fatalf("bootstrap admin auth: %v", err)
+	}
+	if _, err := svc.CreateTask(context.Background(), application.CreateTaskInput{UserID: admin.ID(), Title: "admin task"}); err != nil {
+		t.Fatalf("create admin task: %v", err)
+	}
+	if _, err := svc.CreateTask(context.Background(), application.CreateTaskInput{UserID: regular.ID(), Title: "user task"}); err != nil {
+		t.Fatalf("create user task: %v", err)
+	}
+
+	r, err := httpweb.NewRouter(svc)
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	c := newLoggedInClient(t, r, "regular@x.com", "pw")
+
+	// Full page: only the user's own task is listed, and the stats strip
+	// counts only it — never the admin's task.
+	w := c.do(t, "GET", "/app/", false, nil)
+	body := w.Body.String()
+	if !strings.Contains(body, "user task") {
+		t.Errorf("regular user index missing their task: %s", body)
+	}
+	if strings.Contains(body, "admin task") {
+		t.Errorf("regular user index leaks admin task: %s", body)
+	}
+	if !strings.Contains(body, "of 1 total") {
+		t.Errorf("regular user stats total wrong: %s", body)
+	}
+
+	// Stats fragment is scoped the same way.
+	sw := c.do(t, "GET", "/app/stats", true, nil)
+	if !strings.Contains(sw.Body.String(), "of 1 total") {
+		t.Errorf("regular user stats fragment wrong: %s", sw.Body.String())
+	}
+
+	// The admin still spans every user.
+	ac := newLoggedInClient(t, r, "admin@email.com", "admin")
+	aIndex := ac.do(t, "GET", "/app/", false, nil)
+	aBody := aIndex.Body.String()
+	if !strings.Contains(aBody, "admin task") || !strings.Contains(aBody, "user task") {
+		t.Errorf("admin index should list both tasks: %s", aBody)
+	}
+	if !strings.Contains(aBody, "of 2 total") {
+		t.Errorf("admin stats total wrong: %s", aBody)
+	}
+}
+
+// TestWebTaskIDOwnership guards FR-U4 on the /app task routes: a regular
+// user cannot open the edit/delete forms of another user's task nor mutate
+// it by direct URL — every attempt answers 404 like a missing task.
+func TestWebTaskIDOwnership(t *testing.T) {
+	repo := memory.NewTaskRepositoryMem()
+	svc := newTestService(repo)
+	ctx := context.Background()
+
+	admin, err := svc.AuthUser(ctx, "admin@email.com", "admin")
+	if err != nil {
+		t.Fatalf("bootstrap admin auth: %v", err)
+	}
+	foreign, err := svc.CreateTask(ctx, application.CreateTaskInput{UserID: admin.ID(), Title: "admin task"})
+	if err != nil {
+		t.Fatalf("create admin task: %v", err)
+	}
+	hash, err := application.HashPassword("pw", application.TestPasswordCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	regular, err := domain.NewUser("u-regular", "regular@x.com", hash, "key-regular", false)
+	if err != nil {
+		t.Fatalf("NewUser(regular): %v", err)
+	}
+	if err := repo.CreateUser(ctx, regular); err != nil {
+		t.Fatalf("CreateUser(regular): %v", err)
+	}
+	own, err := svc.CreateTask(ctx, application.CreateTaskInput{UserID: regular.ID(), Title: "user task"})
+	if err != nil {
+		t.Fatalf("create user task: %v", err)
+	}
+	foreignID := foreign.ID().String()
+
+	r, err := httpweb.NewRouter(svc)
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	c := newLoggedInClient(t, r, "regular@x.com", "pw")
+
+	// Every /app task route aimed at the admin's task answers 404.
+	if w := c.do(t, "GET", "/app/tasks/"+foreignID+"/edit", true, nil); w.Code != http.StatusNotFound {
+		t.Errorf("foreign edit form status = %d, want 404", w.Code)
+	}
+	if w := c.do(t, "GET", "/app/tasks/"+foreignID+"/delete", true, nil); w.Code != http.StatusNotFound {
+		t.Errorf("foreign delete form status = %d, want 404", w.Code)
+	}
+	if w := c.do(t, "PATCH", "/app/tasks/"+foreignID, true, url.Values{"title": {"hijacked"}}); w.Code != http.StatusNotFound {
+		t.Errorf("foreign PATCH status = %d, want 404", w.Code)
+	}
+	if w := c.do(t, "POST", "/app/tasks/"+foreignID+"/status", true, url.Values{"status": {"done"}}); w.Code != http.StatusNotFound {
+		t.Errorf("foreign status change status = %d, want 404", w.Code)
+	}
+	if w := c.do(t, "DELETE", "/app/tasks/"+foreignID, true, nil); w.Code != http.StatusNotFound {
+		t.Errorf("foreign DELETE status = %d, want 404", w.Code)
+	}
+
+	// The admin's task was not modified.
+	got, err := svc.GetTask(ctx, foreign.ID(), application.CallerOf(admin))
+	if err != nil {
+		t.Fatalf("reload foreign task: %v", err)
+	}
+	if got.Title() != "admin task" || got.Status() != domain.StatusTodo {
+		t.Errorf("foreign task was modified: %+v", got)
+	}
+
+	// The owner still reaches their own task through the same routes.
+	ownID := own.ID().String()
+	if w := c.do(t, "GET", "/app/tasks/"+ownID+"/edit", true, nil); w.Code != http.StatusOK {
+		t.Errorf("own edit form status = %d, want 200", w.Code)
+	}
+	if w := c.do(t, "POST", "/app/tasks/"+ownID+"/status", true, url.Values{"status": {"in_progress"}}); w.Code != http.StatusOK {
+		t.Errorf("own status change status = %d, want 200", w.Code)
+	}
+	if w := c.do(t, "DELETE", "/app/tasks/"+ownID, true, nil); w.Code != http.StatusOK {
+		t.Errorf("own DELETE status = %d, want 200", w.Code)
+	}
+}
+
 // --- FR-1: list / filters / pagination -----------------------------------
 
 func TestWebListFiltersCompose(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "buy milk")
-	seedWebTask(t, r, "write tests")
-	advanceStatus(t, r, "id-001", "in_progress")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "buy milk")
+	seedWebTask(t, c, "write tests")
+	advanceStatus(t, c, "id-001", "in_progress")
 
-	w := webDo(t, r, "GET", "/app/tasks?status=in_progress&search=milk", true, nil)
+	w := c.do(t, "GET", "/app/tasks?status=in_progress&search=milk", true, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list status = %d", w.Code)
 	}
@@ -191,9 +402,9 @@ func TestWebListFiltersCompose(t *testing.T) {
 }
 
 func TestWebListNoMatch(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "one")
-	w := webDo(t, r, "GET", "/app/tasks?status=done", true, nil)
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "one")
+	w := c.do(t, "GET", "/app/tasks?status=done", true, nil)
 	body := w.Body.String()
 	if !strings.Contains(body, "No tasks match") {
 		t.Errorf("no-match state missing: %s", body)
@@ -201,11 +412,11 @@ func TestWebListNoMatch(t *testing.T) {
 }
 
 func TestWebPaginationBoundaries(t *testing.T) {
-	r := newWebEngine(t)
+	_, c := newWebSession(t)
 	for i := 0; i < 5; i++ {
-		seedWebTask(t, r, fmt.Sprintf("t%d", i))
+		seedWebTask(t, c, fmt.Sprintf("t%d", i))
 	}
-	w := webDo(t, r, "GET", "/app/tasks", true, nil)
+	w := c.do(t, "GET", "/app/tasks", true, nil)
 	body := w.Body.String()
 	if strings.Contains(body, "btn-disabled\">Next") {
 		t.Log("next disabled as expected on last page")
@@ -217,25 +428,25 @@ func TestWebPaginationBoundaries(t *testing.T) {
 // --- FR-2: create ---------------------------------------------------------
 
 func TestWebCreate(t *testing.T) {
-	r := newWebEngine(t)
+	_, c := newWebSession(t)
 	form := url.Values{"title": {"Fix bug"}, "description": {"oAuth"}, "priority": {"4"}}
-	w := webDo(t, r, "POST", "/app/tasks", true, form)
+	w := c.do(t, "POST", "/app/tasks", true, form)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create status = %d; body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), "Task created") {
 		t.Errorf("create missing success toast: %s", w.Body.String())
 	}
-	sw := webDo(t, r, "GET", "/app/stats", true, nil)
+	sw := c.do(t, "GET", "/app/stats", true, nil)
 	if !strings.Contains(sw.Body.String(), "of 1 total") {
 		t.Errorf("stats after create wrong: %s", sw.Body.String())
 	}
 }
 
 func TestWebCreateEmptyTitle(t *testing.T) {
-	r := newWebEngine(t)
+	_, c := newWebSession(t)
 	form := url.Values{"title": {""}, "priority": {"0"}}
-	w := webDo(t, r, "POST", "/app/tasks", true, form)
+	w := c.do(t, "POST", "/app/tasks", true, form)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("create empty-title status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -245,9 +456,9 @@ func TestWebCreateEmptyTitle(t *testing.T) {
 }
 
 func TestWebCreatePriorityOutOfRange(t *testing.T) {
-	r := newWebEngine(t)
+	_, c := newWebSession(t)
 	form := url.Values{"title": {"t"}, "priority": {"9"}}
-	w := webDo(t, r, "POST", "/app/tasks", true, form)
+	w := c.do(t, "POST", "/app/tasks", true, form)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("create out-of-range priority status = %d, want 400", w.Code)
 	}
@@ -256,9 +467,9 @@ func TestWebCreatePriorityOutOfRange(t *testing.T) {
 // --- FR-3: edit -----------------------------------------------------------
 
 func TestWebEditForm(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "old")
-	w := webDo(t, r, "GET", "/app/tasks/id-001/edit", true, nil)
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "old")
+	w := c.do(t, "GET", "/app/tasks/id-001/edit", true, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("edit form status = %d", w.Code)
 	}
@@ -268,10 +479,10 @@ func TestWebEditForm(t *testing.T) {
 }
 
 func TestWebUpdateTitle(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "old")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "old")
 	form := url.Values{"title": {"new name"}}
-	w := webDo(t, r, "PATCH", "/app/tasks/id-001", true, form)
+	w := c.do(t, "PATCH", "/app/tasks/id-001", true, form)
 	if w.Code != http.StatusOK {
 		t.Fatalf("update status = %d; body=%s", w.Code, w.Body.String())
 	}
@@ -281,10 +492,10 @@ func TestWebUpdateTitle(t *testing.T) {
 }
 
 func TestWebUpdateEmptyTitle(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "x")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "x")
 	form := url.Values{"title": {""}, "priority": {"3"}}
-	w := webDo(t, r, "PATCH", "/app/tasks/id-001", true, form)
+	w := c.do(t, "PATCH", "/app/tasks/id-001", true, form)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("update empty-title status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -293,13 +504,13 @@ func TestWebUpdateEmptyTitle(t *testing.T) {
 // --- FR-4: status ---------------------------------------------------------
 
 func TestWebStatusTransitions(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "task")
-	advanceStatus(t, r, "id-001", "in_progress")
-	advanceStatus(t, r, "id-001", "done")
-	advanceStatus(t, r, "id-001", "archived")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "task")
+	advanceStatus(t, c, "id-001", "in_progress")
+	advanceStatus(t, c, "id-001", "done")
+	advanceStatus(t, c, "id-001", "archived")
 
-	sw := webDo(t, r, "GET", "/app/stats", true, nil)
+	sw := c.do(t, "GET", "/app/stats", true, nil)
 	body := sw.Body.String()
 	if !strings.Contains(body, "of 1 total") {
 		t.Errorf("stats after lifecycle wrong: %s", body)
@@ -307,27 +518,27 @@ func TestWebStatusTransitions(t *testing.T) {
 }
 
 func TestWebIllegalTransition(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "task")
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "task")
 	form := url.Values{"status": {"done"}}
-	w := webDo(t, r, "POST", "/app/tasks/id-001/status", true, form)
+	w := c.do(t, "POST", "/app/tasks/id-001/status", true, form)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("illegal transition status = %d, want 409; body=%s", w.Code, w.Body.String())
 	}
 }
 
 func TestWebStatusActionRenderedPerRow(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "task")
-	w := webDo(t, r, "GET", "/app/tasks", true, nil)
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "task")
+	w := c.do(t, "GET", "/app/tasks", true, nil)
 	body := w.Body.String()
 	if !strings.Contains(body, ">Start</button>") {
 		t.Errorf("todo row missing Start action: %s", body)
 	}
-	advanceStatus(t, r, "id-001", "in_progress")
-	advanceStatus(t, r, "id-001", "done")
-	advanceStatus(t, r, "id-001", "archived")
-	w = webDo(t, r, "GET", "/app/tasks", true, nil)
+	advanceStatus(t, c, "id-001", "in_progress")
+	advanceStatus(t, c, "id-001", "done")
+	advanceStatus(t, c, "id-001", "archived")
+	w = c.do(t, "GET", "/app/tasks", true, nil)
 	body = w.Body.String()
 	if strings.Contains(body, ">Start</button>") || strings.Contains(body, ">Complete</button>") {
 		t.Errorf("archived row should not offer status actions: %s", body)
@@ -337,9 +548,9 @@ func TestWebStatusActionRenderedPerRow(t *testing.T) {
 // --- FR-5: delete ---------------------------------------------------------
 
 func TestWebDeleteFormAndDelete(t *testing.T) {
-	r := newWebEngine(t)
-	seedWebTask(t, r, "gone")
-	w := webDo(t, r, "GET", "/app/tasks/id-001/delete", true, nil)
+	_, c := newWebSession(t)
+	seedWebTask(t, c, "gone")
+	w := c.do(t, "GET", "/app/tasks/id-001/delete", true, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("delete form status = %d", w.Code)
 	}
@@ -347,14 +558,14 @@ func TestWebDeleteFormAndDelete(t *testing.T) {
 		t.Errorf("delete confirm missing title: %s", w.Body.String())
 	}
 
-	d := webDo(t, r, "DELETE", "/app/tasks/id-001", true, nil)
+	d := c.do(t, "DELETE", "/app/tasks/id-001", true, nil)
 	if d.Code != http.StatusOK {
 		t.Fatalf("delete status = %d; body=%s", d.Code, d.Body.String())
 	}
 	if !strings.Contains(d.Body.String(), "Task deleted") {
 		t.Errorf("delete missing toast: %s", d.Body.String())
 	}
-	sw := webDo(t, r, "GET", "/app/stats", true, nil)
+	sw := c.do(t, "GET", "/app/stats", true, nil)
 	if !strings.Contains(sw.Body.String(), "of 0 total") {
 		t.Errorf("stats after delete wrong: %s", sw.Body.String())
 	}
@@ -368,9 +579,10 @@ func TestWebStorageError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestWebStorageError: %v", err)
 	}
+	c := newLoggedInClient(t, r, "admin@email.com", "admin")
 
 	form := url.Values{"title": {"t"}}
-	w := webDo(t, r, "POST", "/app/tasks", true, form)
+	w := c.do(t, "POST", "/app/tasks", true, form)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("storage error status = %d, want 503", w.Code)
 	}
@@ -391,4 +603,144 @@ func (f *failingRepo) Create(ctx context.Context, t domain.Task) error {
 		return domain.Storage("disk exploded")
 	}
 	return f.TaskRepository.Create(ctx, t)
+}
+
+// ---- phase 11 of docs/auth-plan.md: user management ----
+
+// TestWebUsersAdminOnly: a non-admin is denied /app/users (403) and the
+// index navbar has no Admin link.
+func TestWebUsersAdminOnly(t *testing.T) {
+	r := newWebEngine(t)
+	// Log in as the seeded admin to create a regular user.
+	admin := newLoggedInClient(t, r, "admin@email.com", "admin")
+
+	// Non-admin login requires creating the user first — do it via the admin
+	// on the users page.
+	form := url.Values{
+		"email": {"alice@example.com"}, "password": {"pw-alice"},
+		"csrf_token": {admin.csrf},
+	}
+	w := admin.do(t, "POST", "/app/users", false, form)
+	if w.Code != http.StatusSeeOther && w.Code != http.StatusOK {
+		t.Fatalf("create user status = %d; body=%s", w.Code, w.Body.String())
+	}
+
+	alice := newLoggedInClient(t, r, "alice@example.com", "pw-alice")
+	if w := alice.do(t, "GET", "/app/users", false, nil); w.Code != http.StatusForbidden {
+		t.Errorf("non-admin GET /app/users status = %d, want 403", w.Code)
+	}
+	// Index page for non-admin must not contain the Admin link.
+	w = alice.do(t, "GET", "/app/", false, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("index status = %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), `href="/app/users"`) {
+		t.Error("non-admin navbar must not contain the Admin link")
+	}
+	// Admin navbar must contain it.
+	w = admin.do(t, "GET", "/app/", false, nil)
+	if !strings.Contains(w.Body.String(), `href="/app/users"`) {
+		t.Error("admin navbar must contain the Admin link")
+	}
+}
+
+func TestWebUserCRUDFlow(t *testing.T) {
+	r := newWebEngine(t)
+	admin := newLoggedInClient(t, r, "admin@email.com", "admin")
+
+	// Create.
+	form := url.Values{
+		"email": {"bob@example.com"}, "password": {"pw-bob"}, "isadmin": {"on"},
+		"csrf_token": {admin.csrf},
+	}
+	if w := admin.do(t, "POST", "/app/users", true, form); w.Code != http.StatusOK {
+		t.Fatalf("create status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if w := admin.do(t, "GET", "/app/users", false, nil); !strings.Contains(w.Body.String(), "bob@example.com") {
+		t.Fatal("bob missing from user list after create")
+	}
+
+	// Find bob's id from the list page (search the row containing his email).
+	w := admin.do(t, "GET", "/app/users", false, nil)
+	body := w.Body.String()
+	emailIdx := strings.Index(body, "bob@example.com")
+	rowPrefix := `id="user-row-`
+	rowIdx := strings.LastIndex(body[:emailIdx], rowPrefix)
+	bobID := body[rowIdx+len(rowPrefix):]
+	bobID = bobID[:strings.Index(bobID, `"`)]
+
+	// Edit: change email only.
+	form = url.Values{"email": {"robert@example.com"}, "csrf_token": {admin.csrf}}
+	w = admin.do(t, "PATCH", "/app/users/"+bobID, true, form)
+	if w.Code != http.StatusOK {
+		t.Fatalf("update status = %d; body=%s", w.Code, w.Body.String())
+	}
+	// Password unchanged: robert can still log in with pw-bob.
+	robert := newLoggedInClient(t, r, "robert@example.com", "pw-bob")
+	if robert == nil {
+		t.Fatal("robert login failed after email change")
+	}
+
+	// Self-delete is blocked server-side.
+	form = url.Values{}
+	w = admin.do(t, "DELETE", "/app/users/bogus-id", true, form) // 404 first
+	if w.Code == http.StatusForbidden && strings.Contains(w.Body.String(), "own account") {
+		t.Fatal("unexpected self-delete path for bogus id")
+	}
+
+	// Delete bob (robert) — admin is not the target, so allowed.
+	w = admin.do(t, "DELETE", "/app/users/"+bobID, true, url.Values{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if w := admin.do(t, "GET", "/app/users", false, nil); strings.Contains(w.Body.String(), "robert@example.com") {
+		t.Error("robert still listed after delete")
+	}
+}
+
+func TestWebUserCreateDuplicateEmail(t *testing.T) {
+	r := newWebEngine(t)
+	admin := newLoggedInClient(t, r, "admin@email.com", "admin")
+	form := url.Values{
+		"email": {"admin@email.com"}, "password": {"x"}, "csrf_token": {admin.csrf},
+	}
+	w := admin.do(t, "POST", "/app/users", true, form)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("duplicate email status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWebUserDeleteSelfForbidden(t *testing.T) {
+	r := newWebEngine(t)
+	admin := newLoggedInClient(t, r, "admin@email.com", "admin")
+	// Resolve the admin's own id from the users page.
+	w := admin.do(t, "GET", "/app/users", false, nil)
+	body := w.Body.String()
+	marker := `hx-delete="/app/users/`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		// No delete buttons rendered for the only (own) user — that's the
+		// expected UX: self-delete is not even offered.
+		return
+	}
+	rest := body[i+len(marker):]
+	selfID := rest[:strings.Index(rest, `"`)]
+	w = admin.do(t, "DELETE", "/app/users/"+selfID, true, url.Values{})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("self-delete status = %d, want 403", w.Code)
+	}
+}
+
+func TestWebUserCSRFRequired(t *testing.T) {
+	r := newWebEngine(t)
+	admin := newLoggedInClient(t, r, "admin@email.com", "admin")
+	// Strip the CSRF token: form POST without token must be 403.
+	form := url.Values{"email": {"x@example.com"}, "password": {"y"}}
+	saved := admin.csrf
+	admin.csrf = ""
+	w := admin.do(t, "POST", "/app/users", true, form)
+	admin.csrf = saved
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF status = %d, want 403", w.Code)
+	}
 }

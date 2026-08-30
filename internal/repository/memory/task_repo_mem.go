@@ -43,11 +43,26 @@ func (provider) Open(_ context.Context, _ string) (repository.TaskRepository, io
 // port. It demonstrates that the application layer has no dependency on the
 // storage engine.
 type TaskRepositoryMem struct {
-	store map[string]domain.Task
+	store  map[string]domain.Task
+	users  map[string]domain.User
+	seeded bool
 }
 
 func NewTaskRepositoryMem() repository.TaskRepository {
-	return &TaskRepositoryMem{store: map[string]domain.Task{}}
+	return &TaskRepositoryMem{
+		store: map[string]domain.Task{},
+		users: map[string]domain.User{},
+	}
+}
+
+// seedOnce lazily runs the bootstrap-admin seeding (no-op after the first
+// successful seed). Idempotent per spec FR-U5.
+func (m *TaskRepositoryMem) seedOnce() {
+	if m.seeded {
+		return
+	}
+	m.seeded = true
+	m.seed(context.Background())
 }
 
 // Create inserts a new task, returning domain.Conflict when the ID is
@@ -73,10 +88,14 @@ func (m *TaskRepositoryMem) ByID(_ context.Context, id domain.TaskID) (domain.Ta
 
 // List returns the tasks matching the filter, ordered by priority
 // descending, then created_at descending, with paging applied. Search is
-// case-insensitive substring matching on title and description.
+// case-insensitive substring matching on title and description. A non-nil
+// f.UserID scopes the list to that owner's tasks; nil lists all users' tasks.
 func (m *TaskRepositoryMem) List(_ context.Context, f repository.TaskFilter) ([]domain.Task, error) {
 	var out []domain.Task
 	for _, t := range m.store {
+		if f.UserID != nil && t.UserID() != *f.UserID {
+			continue
+		}
 		if f.Status != nil && t.Status() != *f.Status {
 			continue
 		}
@@ -113,15 +132,29 @@ func (m *TaskRepositoryMem) List(_ context.Context, f repository.TaskFilter) ([]
 	return out[start:end], nil
 }
 
-// Count returns the total number of stored tasks.
-func (m *TaskRepositoryMem) Count(_ context.Context) (int, error) {
-	return len(m.store), nil
-}
-
-// CountByStatus returns the number of stored tasks in the given status.
-func (m *TaskRepositoryMem) CountByStatus(_ context.Context, status domain.Status) (int, error) {
+// Count returns the total number of stored tasks, honoring the filter's
+// UserID scope (nil = all users, admin scope).
+func (m *TaskRepositoryMem) Count(_ context.Context, f repository.TaskFilter) (int, error) {
+	if f.UserID == nil {
+		return len(m.store), nil
+	}
 	n := 0
 	for _, t := range m.store {
+		if t.UserID() == *f.UserID {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// CountByStatus returns the number of stored tasks in the given status,
+// honoring the filter's UserID scope (nil = all users, admin scope).
+func (m *TaskRepositoryMem) CountByStatus(_ context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
+	n := 0
+	for _, t := range m.store {
+		if f.UserID != nil && t.UserID() != *f.UserID {
+			continue
+		}
 		if t.Status() == status {
 			n++
 		}
