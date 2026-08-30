@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"hexarch/internal/repository"
@@ -36,6 +37,11 @@ type provider struct{}
 func (provider) Open(ctx context.Context, uri string) (repository.TaskRepository, io.Closer, error) {
 	if uri == "" {
 		uri = repository.DefaultURI
+	}
+	// Enforce foreign keys on every pooled connection via the dsn pragma
+	// (per-connection default is OFF); cascade deletes depend on it.
+	if !strings.Contains(uri, "?") {
+		uri += "?_pragma=foreign_keys(1)"
 	}
 	db, err := sql.Open("sqlite", uri)
 	if err != nil {

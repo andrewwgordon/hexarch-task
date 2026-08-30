@@ -18,6 +18,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"modernc.org/sqlite"
+
+	"hexarch/internal/domain"
 )
 
 // Dialect isolates the SQL variance between relational backends so the shared
@@ -67,9 +69,31 @@ func (SQLite) CaseInsensitiveMatch(column, placeholder string) string {
 }
 
 func (SQLite) CreateSchema(ctx context.Context, db *sql.DB) error {
-	const create = `
+	// Per-connection FK enforcement; modernc.org/sqlite also accepts the
+	// _pragma dsn parameter (set by the provider for pool-wide effect).
+	_, _ = db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	const createUsers = `
+    CREATE TABLE IF NOT EXISTS users (
+        id       TEXT    NOT NULL PRIMARY KEY,
+        email    TEXT    NOT NULL UNIQUE,
+        password TEXT    NOT NULL,   -- bcrypt hash only
+        apikey   TEXT    NOT NULL UNIQUE,
+        isadmin  INTEGER NOT NULL DEFAULT 0
+    );`
+	if _, err := db.ExecContext(ctx, createUsers); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, createUsers); err != nil {
+		return err
+	}
+	// Seed the admin BEFORE migrating tasks, so the backfill target exists.
+	if err := seedAdmin(ctx, db); err != nil {
+		return err
+	}
+	const createTasks = `
     CREATE TABLE IF NOT EXISTS tasks (
         id          TEXT    NOT NULL PRIMARY KEY,
+        user_id     TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title       TEXT    NOT NULL,
         description TEXT    NOT NULL DEFAULT '',
         status      TEXT    NOT NULL,
@@ -78,8 +102,53 @@ func (SQLite) CreateSchema(ctx context.Context, db *sql.DB) error {
         created_at  INTEGER NOT NULL,
         updated_at  INTEGER NOT NULL
     );`
-	_, err := db.ExecContext(ctx, create)
-	return err
+	if _, err := db.ExecContext(ctx, createTasks); err != nil {
+		return err
+	}
+	adminID, err := firstAdminID(ctx, db)
+	if err != nil {
+		return err
+	}
+	return migrateSQLiteTasks(ctx, db, adminID)
+}
+
+// migrateSQLiteTasks upgrades pre-multiuser databases in place (spec §3.6):
+// add tasks.user_id when absent, then backfill NULLs to the seeded admin's
+// id. SQLite cannot ADD COLUMN with NOT NULL and no default, so the column
+// is added nullable; every task row is immediately backfilled to the seeded
+// admin, which restores the app-level NOT NULL invariant. A full table
+// rebuild is explicitly out of scope (spec §3.11).
+func migrateSQLiteTasks(ctx context.Context, db *sql.DB, adminID domain.UserID) error {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('tasks')`)
+	if err != nil {
+		return fmt.Errorf("sqlite: inspect tasks: %w", err)
+	}
+	hasUserID := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		if strings.EqualFold(name, "user_id") {
+			hasUserID = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasUserID {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE`); err != nil {
+			return fmt.Errorf("sqlite: add user_id: %w", err)
+		}
+	}
+	// Backfill any NULL owner to the seeded admin.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE tasks SET user_id = ? WHERE user_id IS NULL OR user_id = ''`, adminID); err != nil {
+		return fmt.Errorf("sqlite: backfill user_id: %w", err)
+	}
+	return nil
 }
 
 // ---- Postgres ----
@@ -115,9 +184,24 @@ func (Postgres) CaseInsensitiveMatch(column, placeholder string) string {
 }
 
 func (Postgres) CreateSchema(ctx context.Context, db *sql.DB) error {
+	const createUsers = `
+    CREATE TABLE IF NOT EXISTS users (
+        id       TEXT    NOT NULL PRIMARY KEY,
+        email    TEXT    NOT NULL UNIQUE,
+        password TEXT    NOT NULL,   -- bcrypt hash only
+        apikey   TEXT    NOT NULL UNIQUE,
+        isadmin  BOOLEAN NOT NULL DEFAULT false
+    );`
+	if _, err := db.ExecContext(ctx, createUsers); err != nil {
+		return err
+	}
+	if err := seedAdmin(ctx, db); err != nil {
+		return err
+	}
 	const create = `
     CREATE TABLE IF NOT EXISTS tasks (
         id          TEXT    NOT NULL PRIMARY KEY,
+        user_id     TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title       TEXT    NOT NULL,
         description TEXT    NOT NULL DEFAULT '',
         status      TEXT    NOT NULL,
@@ -164,11 +248,32 @@ func (Oracle) CaseInsensitiveMatch(column, placeholder string) string {
 
 func (Oracle) CreateSchema(ctx context.Context, db *sql.DB) error {
 	// Oracle has no CREATE TABLE IF NOT EXISTS, so embed the DDL in a
-	// PL/SQL block and swallow ORA-00955 ("name is already used").
+	// PL/SQL block and swallow ORA-00955 ("name is already used"). Inline
+	// column-clause ON DELETE CASCADE is supported since Oracle 8i (the
+	// 12c floor is for OFFSET ... FETCH pagination, not FKs).
+	const createUsers = `
+    BEGIN
+        EXECUTE IMMEDIATE 'CREATE TABLE users (
+            id       VARCHAR2(64)  NOT NULL PRIMARY KEY,
+            email    VARCHAR2(255) NOT NULL UNIQUE,
+            password VARCHAR2(64)  NOT NULL,
+            apikey   VARCHAR2(64)  NOT NULL UNIQUE,
+            isadmin  NUMBER(1)     NOT NULL DEFAULT 0
+        )';
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLCODE != -955 THEN RAISE; END IF;
+    END;`
+	if _, err := db.ExecContext(ctx, createUsers); err != nil {
+		return err
+	}
+	if err := seedAdmin(ctx, db); err != nil {
+		return err
+	}
 	const create = `
     BEGIN
         EXECUTE IMMEDIATE 'CREATE TABLE tasks (
             id          VARCHAR2(64)  NOT NULL PRIMARY KEY,
+            user_id     VARCHAR2(64)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             title       VARCHAR2(4000) NOT NULL,
             description VARCHAR2(4000) NOT NULL DEFAULT ''''',
             status      VARCHAR2(32)  NOT NULL,

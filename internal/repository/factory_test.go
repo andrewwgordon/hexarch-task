@@ -23,6 +23,19 @@ func mustTime() time.Time {
 	return time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 }
 
+// seedOwnerUser creates the fixture task owner (u-owner) on the given repo so
+// the tasks.user_id foreign key accepts fixture tasks.
+func seedOwnerUser(t *testing.T, repo repository.TaskRepository) {
+	t.Helper()
+	u, err := domain.NewUser("u-owner", "owner@fixture.test", "$2a$04$fixturefixturefixturefixturefixturefixturefixturefix", "owner-apikey-fixture", false)
+	if err != nil {
+		t.Fatalf("NewUser(owner): %v", err)
+	}
+	if err := repo.CreateUser(context.Background(), u); err != nil {
+		t.Fatalf("CreateUser(owner): %v", err)
+	}
+}
+
 func TestNewSQLiteViaFactory(t *testing.T) {
 	uri := filepath.Join(t.TempDir(), "tasks.db")
 	repo, closer, err := repository.New(context.Background(),
@@ -35,7 +48,8 @@ func TestNewSQLiteViaFactory(t *testing.T) {
 	}
 	defer closer.Close()
 
-	task, err := domain.NewTask("f1", "via factory", "", 1, nil, mustTime())
+	seedOwnerUser(t, repo)
+	task, err := domain.NewTask("f1", "u-owner", "via factory", "", 1, nil, mustTime())
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -74,7 +88,8 @@ func TestNewMemoryViaFactory(t *testing.T) {
 	}
 	defer closer.Close()
 
-	task, err := domain.NewTask("m1", "mem", "", 1, nil, mustTime())
+	seedOwnerUser(t, repo)
+	task, err := domain.NewTask("m1", "u-owner", "mem", "", 1, nil, mustTime())
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -107,7 +122,8 @@ func TestRegisterCustomBackend(t *testing.T) {
 		t.Fatalf("New after Register: %v", err)
 	}
 	defer closer.Close()
-	task, err := domain.NewTask("c1", "custom", "", 1, nil, mustTime())
+	seedOwnerUser(t, repo)
+	task, err := domain.NewTask("c1", "u-owner", "custom", "", 1, nil, mustTime())
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

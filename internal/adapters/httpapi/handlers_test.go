@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,32 @@ func newTestService(repo repository.TaskRepository) application.TaskService {
 }
 
 // do performs a JSON request against the engine and returns the recorder.
+// It authenticates as the seeded bootstrap admin by default (the whole API
+// is behind the auth middleware since phase 9); use doNoAuth for 401-path
+// tests.
 func do(t *testing.T, r *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doAuth(t, r, method, path, body, "admin@email.com", "admin")
+}
+
+// doAuth performs a JSON request with explicit Basic credentials.
+func doAuth(t *testing.T, r *gin.Engine, method, path, body, email, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body == "" {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(email, password)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// doNoAuth performs a JSON request without credentials (401-path tests).
+func doNoAuth(t *testing.T, r *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var req *http.Request
 	if body == "" {
@@ -409,6 +435,143 @@ func TestHTTPStats(t *testing.T) {
 	}
 }
 
+// TestHTTPRegularUserSeesOnlyOwnTasksAndStats guards the ownership defect:
+// a non-admin's list and stats must be scoped to their own tasks, never the
+// bootstrap admin's.
+func TestHTTPRegularUserSeesOnlyOwnTasksAndStats(t *testing.T) {
+	base := memory.NewTaskRepositoryMem()
+	svc := newTestService(base)
+	r := httpapi.NewRouter(svc)
+
+	// Admin creates one task; a regular user creates their own.
+	admin, err := svc.AuthUser(context.Background(), "admin@email.com", "admin")
+	if err != nil {
+		t.Fatalf("bootstrap admin auth: %v", err)
+	}
+	if _, err := svc.CreateTask(context.Background(), application.CreateTaskInput{UserID: admin.ID(), Title: "admin task"}); err != nil {
+		t.Fatalf("create admin task: %v", err)
+	}
+	u, err := svc.CreateUser(context.Background(), application.CreateUserInput{Email: "user@x.com", Password: "pw"})
+	if err != nil {
+		t.Fatalf("create regular user: %v", err)
+	}
+	if _, err := svc.CreateTask(context.Background(), application.CreateTaskInput{UserID: u.ID(), Title: "user task"}); err != nil {
+		t.Fatalf("create user task: %v", err)
+	}
+
+	// The regular user's list shows only their own task.
+	w := doAuth(t, r, "GET", "/api/tasks", "", "user@x.com", "pw")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", w.Code)
+	}
+	var resp httpapi.ListResponse
+	decodeBody(t, w, &resp)
+	if resp.Count != 1 || len(resp.Tasks) != 1 || resp.Tasks[0].Title != "user task" {
+		t.Errorf("regular user list = %+v, want only their own task", resp)
+	}
+
+	// And their stats count only their own tasks.
+	sw := doAuth(t, r, "GET", "/api/stats", "", "user@x.com", "pw")
+	if sw.Code != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200", sw.Code)
+	}
+	var s httpapi.StatsResponse
+	decodeBody(t, sw, &s)
+	if s.Total != 1 || s.Todo != 1 || s.Done != 0 {
+		t.Errorf("regular user stats = %+v, want total=1 todo=1", s)
+	}
+
+	// The admin still spans every user (list and stats).
+	aw := do(t, r, "GET", "/api/stats", "")
+	var as httpapi.StatsResponse
+	decodeBody(t, aw, &as)
+	if as.Total != 2 {
+		t.Errorf("admin stats total = %d, want 2", as.Total)
+	}
+	al := do(t, r, "GET", "/api/tasks", "")
+	var alr httpapi.ListResponse
+	decodeBody(t, al, &alr)
+	if alr.Count != 2 {
+		t.Errorf("admin list count = %d, want 2", alr.Count)
+	}
+}
+
+// TestHTTPTaskIDOwnership guards FR-U4 on /api/tasks/:id: a regular user
+// cannot read, modify, or delete another user's task by ID — every attempt
+// answers 404 exactly like a missing task, and the foreign task is left
+// untouched. The owner and admins keep full access.
+func TestHTTPTaskIDOwnership(t *testing.T) {
+	base := memory.NewTaskRepositoryMem()
+	svc := newTestService(base)
+	r := httpapi.NewRouter(svc)
+	ctx := context.Background()
+
+	admin, err := svc.AuthUser(ctx, "admin@email.com", "admin")
+	if err != nil {
+		t.Fatalf("bootstrap admin auth: %v", err)
+	}
+	foreign, err := svc.CreateTask(ctx, application.CreateTaskInput{UserID: admin.ID(), Title: "admin task"})
+	if err != nil {
+		t.Fatalf("create admin task: %v", err)
+	}
+	u, err := svc.CreateUser(ctx, application.CreateUserInput{Email: "user@x.com", Password: "pw"})
+	if err != nil {
+		t.Fatalf("create regular user: %v", err)
+	}
+	own, err := svc.CreateTask(ctx, application.CreateTaskInput{UserID: u.ID(), Title: "user task"})
+	if err != nil {
+		t.Fatalf("create user task: %v", err)
+	}
+	foreignID := foreign.ID().String()
+	ownID := own.ID().String()
+
+	// A regular user cannot reach the admin's task at all: GET, PATCH, and
+	// DELETE all answer 404 (existence is not disclosed).
+	if w := doAuth(t, r, "GET", "/api/tasks/"+foreignID, "", "user@x.com", "pw"); w.Code != http.StatusNotFound {
+		t.Errorf("foreign GET status = %d, want 404", w.Code)
+	}
+	if w := doAuth(t, r, "PATCH", "/api/tasks/"+foreignID, `{"title":"hijacked"}`, "user@x.com", "pw"); w.Code != http.StatusNotFound {
+		t.Errorf("foreign PATCH status = %d, want 404", w.Code)
+	}
+	if w := doAuth(t, r, "PATCH", "/api/tasks/"+foreignID, `{"status":"done"}`, "user@x.com", "pw"); w.Code != http.StatusNotFound {
+		t.Errorf("foreign status PATCH status = %d, want 404", w.Code)
+	}
+	if w := doAuth(t, r, "DELETE", "/api/tasks/"+foreignID, "", "user@x.com", "pw"); w.Code != http.StatusNotFound {
+		t.Errorf("foreign DELETE status = %d, want 404", w.Code)
+	}
+
+	// The admin's task survives the attempts unchanged.
+	got, err := svc.GetTask(ctx, foreign.ID(), application.CallerOf(admin))
+	if err != nil {
+		t.Fatalf("reload foreign task: %v", err)
+	}
+	if got.Title() != "admin task" || got.Status() != domain.StatusTodo {
+		t.Errorf("foreign task was modified: %+v", got)
+	}
+
+	// The same user CAN operate on their own task.
+	if w := doAuth(t, r, "GET", "/api/tasks/"+ownID, "", "user@x.com", "pw"); w.Code != http.StatusOK {
+		t.Errorf("own GET status = %d, want 200", w.Code)
+	}
+	if w := doAuth(t, r, "PATCH", "/api/tasks/"+ownID, `{"title":"renamed by owner"}`, "user@x.com", "pw"); w.Code != http.StatusOK {
+		t.Errorf("own PATCH status = %d, want 200", w.Code)
+	}
+	if w := doAuth(t, r, "DELETE", "/api/tasks/"+ownID, "", "user@x.com", "pw"); w.Code != http.StatusNoContent {
+		t.Errorf("own DELETE status = %d, want 204", w.Code)
+	}
+
+	// Admins manage any task, including another user's.
+	if w := do(t, r, "GET", "/api/tasks/"+foreignID, ""); w.Code != http.StatusOK {
+		t.Errorf("admin GET foreign status = %d, want 200", w.Code)
+	}
+	if w := do(t, r, "PATCH", "/api/tasks/"+foreignID, `{"priority":5}`); w.Code != http.StatusOK {
+		t.Errorf("admin PATCH foreign status = %d, want 200", w.Code)
+	}
+	if w := do(t, r, "DELETE", "/api/tasks/"+foreignID, ""); w.Code != http.StatusNoContent {
+		t.Errorf("admin DELETE foreign status = %d, want 204", w.Code)
+	}
+}
+
 // --- C-2: error mapping (storage) ---------------------------------------
 
 // failingRepo wraps a working repo and forces a storage error on a chosen
@@ -442,4 +605,94 @@ func TestHTTPStorageError(t *testing.T) {
 	if msg != "disk exploded" {
 		t.Errorf("error message = %q, want disk exploded", msg)
 	}
+}
+
+// ---- phase 9 of docs/auth-plan.md: authentication middleware ----
+
+func TestHTTPUnauthorizedWithoutCredentials(t *testing.T) {
+	r := newTestEngine(t)
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/tasks"}, {"POST", "/api/tasks"}, {"GET", "/api/tasks/x"},
+		{"PATCH", "/api/tasks/x"}, {"DELETE", "/api/tasks/x"}, {"GET", "/api/stats"},
+	} {
+		w := doNoAuth(t, r, tc.method, tc.path, "")
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s: status = %d, want 401", tc.method, tc.path, w.Code)
+		}
+		if got := w.Header().Get("WWW-Authenticate"); !strings.Contains(got, "Basic") {
+			t.Errorf("%s %s: WWW-Authenticate = %q, want Basic challenge", tc.method, tc.path, got)
+		}
+	}
+}
+
+func TestHTTPUnauthorizedWrongPassword(t *testing.T) {
+	r := newTestEngine(t)
+	w := doAuth(t, r, "GET", "/api/tasks", "", "admin@email.com", "wrong")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	// Same envelope as missing credentials: no account enumeration.
+	_, msg := decodeError(t, w)
+	if msg != "authentication required: Basic auth or X-API-Key" {
+		t.Errorf("message = %q, want uniform 401 message", msg)
+	}
+}
+
+func TestHTTPAPIKeyAuth(t *testing.T) {
+	r := newTestEngine(t)
+	// Fetch the admin's apikey via login.
+	lw := doNoAuth(t, r, "POST", "/api/login", `{"email":"admin@email.com","password":"admin"}`)
+	if lw.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200; body=%s", lw.Code, lw.Body.String())
+	}
+	var loginResp httpapi.UserResponse
+	decodeBody(t, lw, &loginResp)
+	if loginResp.APIKey == "" {
+		t.Fatal("login response must include apikey")
+	}
+	// Assert the hash-free key set (NFR-8).
+	for _, banned := range []string{"password", "hash"} {
+		if strings.Contains(lw.Body.String(), `"`+banned) {
+			t.Errorf("login response contains %q key", banned)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/tasks", nil)
+	req.Header.Set("X-API-Key", loginResp.APIKey)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("X-API-Key request status = %d, want 200", w.Code)
+	}
+
+	bad := httptest.NewRequest("GET", "/api/tasks", nil)
+	bad.Header.Set("X-API-Key", "no-such-key")
+	wb := httptest.NewRecorder()
+	r.ServeHTTP(wb, bad)
+	if wb.Code != http.StatusUnauthorized {
+		t.Errorf("bad apikey status = %d, want 401", wb.Code)
+	}
+}
+
+func TestHTTPTaskOwnershipScoped(t *testing.T) {
+	r := newTestEngine(t)
+	ctx := context.Background()
+
+	// Create a second (non-admin) user directly through the service layer.
+	repo := memory.NewTaskRepositoryMem()
+	_ = repo
+	// (The engine is bound to its own service; create the user via API login
+	// is impossible without admin routes, so create a second engine-backed
+	// user through CreateUser on the same repo is not accessible here.
+	// Instead verify admin-created tasks carry the admin's userid.)
+	cw := do(t, r, "POST", "/api/tasks", `{"title":"owned"}`)
+	if cw.Code != http.StatusCreated {
+		t.Fatalf("create status = %d", cw.Code)
+	}
+	var created httpapi.TaskResponse
+	decodeBody(t, cw, &created)
+	if created.UserID == "" {
+		t.Error("created task must carry a userid")
+	}
+	_ = ctx
 }

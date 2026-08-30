@@ -154,9 +154,15 @@ jobs:
         shell: bash
         # 'cli list' on an empty in-memory repository proves the binary wires
         # up the full hexagon (repo factory -> service -> adapter) end-to-end.
+        # Every CLI subcommand authenticates first (FR-A1); a fresh memory
+        # backend auto-seeds the bootstrap admin (docs/auth.md §3.6), so we
+        # log in as that account via HEXARCH_EMAIL / HEXARCH_PASSWORD.
         run: |
           bin="./hexarch"
           [ "$RUNNER_OS" = "Windows" ] && bin="./hexarch.exe"
+          "${bin}" cli whoami
           "${bin}" cli list
         env:
           HEXARCH_DB_TYPE: memory
+          HEXARCH_EMAIL: admin@email.com
+          HEXARCH_PASSWORD: admin

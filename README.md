@@ -47,13 +47,16 @@ The project is organised into the classic three rings of a hexagon:
         └──────────────────────────────────────────────────────────┘
 ```
 
-- **Domain** (`internal/domain`) – Pure business logic. `Task` is an immutable
-  value object with a guarded status **state machine** and validation rules. It
-  knows nothing about databases, terminals, or networks.
+- **Domain** (`internal/domain`) – Pure business logic. `Task` and `User` are
+  immutable value objects — `Task` has a guarded status **state machine** and a
+  required owner, `User` carries only a bcrypt password hash — plus validation
+  rules. The domain knows nothing about databases, terminals, or networks.
 - **Application** (`internal/application`) – Use cases and orchestration. The
-  `TaskService` interface is the **inbound port**; it depends only on the
-  `repository.TaskRepository` interface (the **outbound port**), never on a
-  concrete storage engine.
+  `TaskService` interface is the **inbound port** (task use cases plus the
+  user use cases: create/update/delete/list/get/auth users); it depends only on
+  the `repository.TaskRepository` interface (the **outbound port**), never on a
+  concrete storage engine. Password hashing and the anti-enumeration
+  authentication checks live here.
 - **Adapters** (`internal/adapters`) – inbound drivers implementing the shared
   `Adapter` interface and composing `AppBase`:
   - `cli` (`internal/adapters/cli`) parses arguments, invokes the service, and formats output.
@@ -114,22 +117,27 @@ hex-go/
 │   └── main.go                       # Composition root: wires db, repo, service, and adapters
 ├── internal/
 │   ├── domain/                       # Core business logic (pure)
-│   │   ├── task.go                   #   Task entity + state machine + factories
+│   │   ├── task.go                   #   Task entity + state machine + factories (owner-aware)
+│   │   ├── user.go                   #   User entity + UserID + validation
 │   │   ├── errors.go                 #   Typed domain errors
-│   │   └── domain_test.go            #   Domain state machine & validation tests (domain_test pkg)
+│   │   ├── domain_test.go            #   Domain state machine & validation tests (domain_test pkg)
+│   │   └── user_test.go              #   User entity validation tests (domain_test pkg)
 │   ├── application/                  # Use-case layer
 │   │   ├── task_service.go           #   Inbound port (TaskService interface) + input/DTO types
-│   │   ├── task_service_impl.go      #   Concrete use cases, DI for ID/clock
-│   │   ├── idgen.go                  #   UUIDv4-style ID generator
+│   │   ├── task_service_impl.go      #   Concrete use cases (tasks + users), DI for IDs/clock
+│   │   ├── password.go               #   bcrypt hashing/verification (single place)
+│   │   ├── idgen.go                  #   UUIDv4-style IDs + 256-bit API keys
 │   │   └── service_test.go           #   Application use-case tests (application_test pkg)
 │   ├── adapters/                     # Inbound adapters + shared HTTP helpers
 │   │   ├── adapter.go                #   Shared Adapter interface + AppBase struct
 │   │   ├── httpconv/                 #   Shared parsing & error mapping for HTTP adapters
 │   │   │   └── httpconv.go           #     Deadline/status parsing, domain.Kind → HTTP status
 │   │   ├── cli/                      #   CLI adapter
-│   │   │   ├── cli.go                #     Cli struct + subcommands
+│   │   │   ├── cli.go                #     Cli struct + subcommands (auth pre-flight)
 │   │   │   ├── args.go               #     Minimal `--flag value` parser
+│   │   │   └── cli_test.go           #     CLI tests incl. authentication (cli_test pkg)
 │   │   ├── httpapi/                  #   REST API adapter (Gin JSON)
+│   │   │   ├── auth.go               #     Basic auth + X-API-Key middleware
 │   │   │   ├── router.go             #     NewRouter(svc) → *gin.Engine (/api group)
 │   │   │   ├── handlers.go           #     /api route handlers
 │   │   │   ├── handlers_test.go      #     REST API handler tests (httpapi_test pkg)
@@ -138,32 +146,48 @@ hex-go/
 │   │   │   └── server.go             #     Api struct: implements Adapter
 │   │   └── httpweb/                  #   Web UI adapter (Gin + html/template + HTMX)
 │   │       ├── router.go             #     NewRouter(svc) → *gin.Engine (/app group)
-│   │       ├── handlers.go           #     Web route handlers
+│   │       ├── session.go            #     HMAC-signed session cookie (userid only)
+│   │       ├── csrf.go               #     CSRF token cookie + verification middleware
+│   │       ├── middleware.go         #     requireAuth / requireAdmin (per-request user load)
+│   │       ├── handlers.go           #     Web route handlers + login/logout
+│   │       ├── user_handlers.go      #     Admin user management handlers (/app/users)
 │   │       ├── handlers_test.go      #     Web UI handler tests (httpweb_test pkg)
 │   │       ├── views.go              #     Template view structs & presentation helpers
 │   │       ├── parse.go              #     Query-string filter parser
 │   │       ├── errors.go             #     HTML error fragment rendering
 │   │       ├── server.go             #     Web struct: implements Adapter
 │   │       └── templates/            #     HTML templates (DaisyUI + Tailwind CDN + HTMX)
-│   │           ├── index.html
+│   │           ├── index.html        #     Task page (Admin/Logout navbar links, CSRF header)
+│   │           ├── login.html        #     Login page
+│   │           ├── users.html        #     User Management page (admin only)
 │   │           └── partials/         #     HTMX fragments
 │   │               ├── error_alert.html
 │   │               ├── modal_create.html
 │   │               ├── modal_delete.html
 │   │               ├── modal_edit.html
+│   │               ├── modal_user_create.html
+│   │               ├── modal_user_delete.html
+│   │               ├── modal_user_edit.html
 │   │               ├── mutation.html
 │   │               ├── stats.html
 │   │               ├── task_list.html
-│   │               └── task_row.html
+│   │               ├── task_row.html
+│   │               ├── theme_toggle.html
+│   │               ├── user_mutation.html
+│   │               ├── user_row.html
+│   │               └── user_table.html
 │   └── repository/                   # Outbound port + Provider registry + factory + adapters
 │       ├── task_repo.go              #   TaskRepository interface + TaskFilter
 │       ├── config.go                 #   DBType, Config, ConfigFromEnv()
 │       ├── factory.go                #   New(ctx, cfg) + backend registry
 │       ├── conformance/              #   Backend-agnostic contract suite
-│       │   └── conformance.go
+│       │   ├── conformance.go        #     Task + owner-scoping contract
+│       │   └── users.go              #     User contract (CRUD, auth lookup, cascade)
 │       ├── sqldb/                    #   Shared SQL adapter + Dialect abstraction
-│       │   ├── dialect.go            #     SQLite / Postgres / Oracle dialects
-│       │   └── repo.go               #     TaskRepositorySQL(db, Dialect)
+│       │   ├── dialect.go            #     SQLite / Postgres / Oracle dialects + DDL
+│       │   ├── repo.go               #     TaskRepositorySQL(db, Dialect)
+│       │   ├── user_repo.go          #     User methods on the shared SQL core
+│       │   └── seed.go               #     Bootstrap-admin seeding (bcrypt, idempotent)
 │       ├── sqlite/                   #   SQLite backend (default, pure-Go)
 │       ├── postgres/                 #   Postgres backend (pgx)
 │       ├── oracle/                   #   Oracle 12c+ backend (go-ora)
@@ -188,11 +212,12 @@ exercise only exported APIs, preventing brittle coupling to internal details:
 
 | File | Package | What it covers |
 |------|---------|---------------|
-| `internal/repository/conformance/conformance.go` | `sqlite_test` / `memory_test` | Backend-agnostic `TaskRepository` contract suite |
-| `internal/domain/domain_test.go` | `domain_test` | Entity creation, status transitions, validation |
+| `internal/repository/conformance/{conformance,users}.go` | `sqlite_test` / `memory_test` | Backend-agnostic `TaskRepository` contract suite (tasks, owner scoping, users) |
+| `internal/domain/{domain,user}_test.go` | `domain_test` | Entity creation, status transitions, validation, user rules |
 | `internal/application/service_test.go` | `application_test` | Use cases with in-memory repo + deterministic ID/clock |
-| `internal/adapters/httpapi/handlers_test.go` | `httpapi_test` | REST API endpoints, error mapping, parity with CLI |
-| `internal/adapters/httpweb/handlers_test.go` | `httpweb_test` | Web UI endpoints, HTMX fragments, error mapping |
+| `internal/adapters/cli/cli_test.go` | `cli_test` | CLI auth pre-flight, subcommand parsing, output |
+| `internal/adapters/httpapi/handlers_test.go` | `httpapi_test` | REST API endpoints (incl. Basic/API-key auth), error mapping, parity with CLI |
+| `internal/adapters/httpweb/handlers_test.go` | `httpweb_test` | Web UI endpoints, sessions/CSRF, HTMX fragments, error mapping |
 | `test/integration_test.go` | `integration_test` | End-to-end over real TCP + SQLite |
 
 ---
@@ -208,6 +233,18 @@ exercise only exported APIs, preventing brittle coupling to internal details:
   `todo → in_progress → done → archived`.
 - **Delete** tasks.
 - **Stats** — counts per status.
+- **Multi-user & authentication** (see [Authentication](#authentication) for
+  the full architecture):
+  - Email + password sign-in; passwords stored **only** as bcrypt hashes.
+  - Per-user **task ownership** — every task belongs to exactly one user;
+    users see and manage only their own tasks.
+  - **Admin role** (`isadmin`) — sees all tasks and manages users (create,
+    edit, delete) on a dedicated Web UI page.
+  - **API keys** — one 256-bit key per user for `X-API-Key` REST auth.
+  - **Bootstrap admin** (`admin@email.com` / `admin`) seeded automatically on
+    an empty database.
+  - Hardened web sessions (HMAC-signed cookies, per-request privilege
+    refresh) and CSRF protection on every state-changing form.
 
 All core features are available through the **CLI** (`hexarch cli`), the
 **REST API** (`hexarch httpapi`), and the **interactive Web UI** (`hexarch httpweb`).
@@ -219,7 +256,9 @@ All core features are available through the **CLI** (`hexarch cli`), the
 - [Go](https://go.dev/dl/) **1.27+** (per `go.mod`).
 
 No `CGO` compiler is required: the app uses the pure-Go driver
-[`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite).
+[`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite). Password
+hashing uses the pure-Go [`golang.org/x/crypto/bcrypt`](https://pkg.go.dev/golang.org/x/crypto/bcrypt)
+package — the only direct dependency added for authentication.
 
 The Web UI loads DaisyUI v5 and Tailwind CSS v4 directly from a CDN — no
 Node.js or CSS build pipeline is needed.
@@ -262,6 +301,9 @@ Usage:
 | `HEXARCH_DB_URI`    | `tasks.db`          | Backend-specific connection string (see below). |
 | `HEXARCH_DB_PATH`   | *(legacy)*          | Old SQLite-only variable; used as the URI when the backend is `sqlite` and `HEXARCH_DB_URI` is unset. |
 | `HEXARCH_HTTP_ADDR` | `:8080` / `:8081`   | Listen address for `httpapi` (`:8080`) or `httpweb` (`:8081`). |
+| `HEXARCH_EMAIL`     | —                   | CLI fallback for `--email` when authenticating. |
+| `HEXARCH_PASSWORD`  | —                   | CLI fallback for `--password` when authenticating. |
+| `HEXARCH_SESSION_SECRET` | random per boot | HMAC key for web session cookies. Unset = sessions invalidated on restart. |
 
 Backends are resolved by the **repository factory** (`repository.New`). The
 factory looks up the registered `repository.Provider` for the requested type and
@@ -291,18 +333,24 @@ HEXARCH_DB_TYPE=postgres HEXARCH_DB_URI=postgres://... ./hexarch httpapi
 
 ### CLI adapter
 
+> **Authentication is required for every subcommand except `help`:** pass
+> `--email` / `--password` (or set `HEXARCH_EMAIL` / `HEXARCH_PASSWORD`).
+> The CLI always operates on the authenticated user's own tasks; see
+> [Authentication](#authentication).
+
 #### Subcommands
 
 ```
 hexarch cli help                                        # show usage
 
-hexarch cli create --title "Fix login bug" --desc "oAuth redirect" --priority 4 --deadline 2026-09-01
-hexarch cli list                                        # all tasks
-hexarch cli list --status in_progress                   # filter by status
-hexarch cli list --search "login"                       # full-text search
-hexarch cli list --limit 20 --offset 40                 # paging
+hexarch cli create --email admin@email.com --password admin \
+        --title "Fix login bug" --desc "oAuth redirect" --priority 4 --deadline 2026-09-01
+hexarch cli list --email admin@email.com --password admin          # all own tasks
+hexarch cli list --email admin@email.com --password admin --status in_progress
+hexarch cli list --email admin@email.com --password admin --search "login"
+hexarch cli list --email admin@email.com --password admin --limit 20 --offset 40
 
-hexarch cli get <id>                                    # show a task
+hexarch cli get <id>
 hexarch cli rename <id> "New title"
 hexarch cli priority <id> 5
 hexarch cli start <id>       # todo -> in_progress
@@ -311,19 +359,22 @@ hexarch cli deadline <id> 2026-10-15
 hexarch cli deadline <id> done      # clear the deadline
 hexarch cli remove <id>
 hexarch cli stats                # per-status counts
+hexarch cli whoami               # print the authenticated user
 ```
 
 #### Worked example
 
 ```bash
-$ hexarch cli create --title "Ship v1" --priority 5
+$ hexarch cli create --email admin@email.com --password admin --title "Ship v1" --priority 5
 created <uuid>: Ship v1 (todo)
 
-$ hexarch cli list
+$ hexarch cli list --email admin@email.com --password admin
 <uuid>                 Ship v1                p5  todo
 
+$ hexarch cli whoami --email admin@email.com --password admin
+admin@email.com (admin)
+
 $ hexarch cli start <uuid>
-<uuid> is now in_progress
 
 $ hexarch cli done <uuid>
 <uuid> is now done
@@ -362,10 +413,16 @@ HEXARCH_HTTP_ADDR=:9000 ./hexarch httpapi       # env override
 
 #### Endpoints
 
+All endpoints except `POST /api/login` require authentication — HTTP Basic
+auth (`email:password`) or the `X-API-Key` header (see
+[Authentication](#authentication)). Regular users see only their own tasks;
+admins may pass `?user_id=<userid>` (or `?user_id=all`) on list endpoints.
+
 | Method | Path             | Description                                                         | CLI equivalent |
 |--------|------------------|---------------------------------------------------------------------|----------------|
+| POST   | `/api/login`     | Exchange email + password for the user record (incl. apikey)        | `whoami`       |
 | POST   | `/api/tasks`     | Create a task (body: `title`, `description`, `priority`, `deadline`)| `create`       |
-| GET    | `/api/tasks`     | List tasks (`?status=&search=&limit=&offset=`)                      | `list`         |
+| GET    | `/api/tasks`     | List tasks (`?status=&search=&limit=&offset=&user_id=`)             | `list`         |
 | GET    | `/api/tasks/:id` | Get a task by id                                                    | `get`          |
 | PATCH  | `/api/tasks/:id` | Update `title` / `status` / `priority` / `deadline`                 | `rename`, `priority`, `start`, `done`, `deadline` |
 | DELETE | `/api/tasks/:id` | Delete a task                                                       | `remove`       |
@@ -374,7 +431,9 @@ HEXARCH_HTTP_ADDR=:9000 ./hexarch httpapi       # env override
 #### Examples (`curl`)
 
 ```bash
-# create
+# every subcommand except `help` requires authentication:
+#   --email E --password P   (or HEXARCH_EMAIL / HEXARCH_PASSWORD)
+# create (auth required on every subcommand)
 curl -s -X POST http://localhost:8080/api/tasks \
   -H 'Content-Type: application/json' \
   -d '{"title":"Ship v1","priority":5,"deadline":"2026-12-31"}'
@@ -494,11 +553,28 @@ interacting dynamically via HTMX.
   CDN/proxy collisions.
 - **Graceful degradation** — every mutation falls back to a PRG redirect when
   JavaScript is absent.
+- **Login & logout** — dedicated login page with inline error alerts; session
+  cookies signed and expired server-side; conditional **Admin** navbar link.
+- **User Management (admin)** — table of users with create/edit/delete modals,
+  admin-role toggles, self-delete prevention, and success/error toasts.
 
 #### Web routes
 
+All routes except login/logout require an authenticated session; the user
+management routes additionally require the admin role (see
+[Authentication](#authentication)).
+
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/app/login` | Login page (redirects to `/app/` when already signed in) |
+| POST | `/app/login` | Verify credentials, issue session cookie (CSRF-protected) |
+| GET/POST | `/app/logout` | Clear the session, return to the login page |
+| GET | `/app/users` | User Management page (admin only) |
+| POST | `/app/users` | Create a user (admin only) |
+| GET | `/app/users/:id/edit` | Edit-user modal fragment (admin only) |
+| PATCH | `/app/users/:id` | Apply user edits (admin only) |
+| GET | `/app/users/:id/delete` | Delete-confirmation modal fragment (admin only) |
+| DELETE | `/app/users/:id` | Delete a user and their tasks (admin only) |
 | GET | `/app/` | Full page shell (list + stats + filters) |
 | GET | `/app/tasks` | Task list fragment (search, status, paging) |
 | POST | `/app/tasks` | Create a task |
@@ -509,6 +585,226 @@ interacting dynamically via HTMX.
 | DELETE | `/app/tasks/:id` | Delete a task |
 | GET | `/app/stats` | Stats fragment |
 | GET | `/app/partials/empty` | Empty response (toast auto-dismiss backing endpoint) |
+
+---
+
+## Authentication
+
+Since the multi-user update, **every task operation requires authentication**.
+Users own their tasks; an admin (`isadmin = true`) sees and manages all tasks
+and can create, edit, and delete users. This section documents the feature
+set, the technical architecture, and the usage of each adapter. The design
+specification lives in [`docs/auth.md`](docs/auth.md), the delivery plan in
+[`docs/auth-plan.md`](docs/auth-plan.md).
+
+### Features at a glance
+
+| Capability | Where |
+|---|---|
+| Email + password sign-in (bcrypt-hashed, never stored in clear) | all adapters |
+| Per-user task ownership (1-to-many User → Task) | all adapters |
+| Admin role: manage users, see all tasks | Web UI + REST (`?user_id=`) |
+| API keys (`X-API-Key`) for scripted REST access | REST API |
+| Self-service "who am I" | CLI (`whoami`), REST (`POST /api/login`) |
+| Login/logout pages, admin-only User Management page | Web UI |
+| CSRF protection on every state-changing form | Web UI |
+| Bootstrap admin seeded on first start | all backends |
+
+### Technical architecture
+
+Authentication follows the same hexagonal rules as the rest of the codebase —
+no layer shortcuts, no new application service. The user use cases live on the
+existing `TaskService` inbound port; user persistence lives on the existing
+`TaskRepository` outbound port.
+
+```
+        ┌───────────────────────────────────────────────────────────────┐
+        │                     Adapters (inbound)                        │
+        │ cli: --email/--password pre-flight → AuthUser                 │
+        │ httpapi: Basic auth + X-API-Key middleware → AuthUser /       │
+        │          UserByAPIKey (per request)                           │
+        │ httpweb: session cookie middleware → UserByID (per request)   │
+        └──────────────────────────────┬────────────────────────────────┘
+                                       ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │              Application — TaskService (inbound port)         │
+        │  CreateUser / UpdateUser / DeleteUser / ListUsers /           │
+        │  UserByID / AuthUser / UserByAPIKey                           │
+        │  • bcrypt hashing & verification (password.go)                │
+        │  • id minting: RandomUserID + RandomAPIKey (idgen.go)         │
+        │  • guards: last-admin delete/demote, owner existence          │
+        └──────────────────────────────┬────────────────────────────────┘
+                                       ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │   Domain (pure): User + UserID; Task gains a required owner   │
+        └──────────────────────────────┬────────────────────────────────┘
+                                       ▼
+        ┌───────────────────────────────────────────────────────────────┐
+        │  TaskRepository (outbound port) — user methods are LOOKUPS    │
+        │  only; no backend ever hashes or verifies passwords           │
+        │  sqlite / postgres / oracle (shared sqldb core + seed.go)     │
+        │  mongodb (users collection, unique email/apikey indexes)      │
+        │  memory (reference implementation for the conformance suite)  │
+        └───────────────────────────────────────────────────────────────┘
+```
+
+#### Data model
+
+```
+users (one) ──────< tasks (many)          FK: tasks.user_id → users.id
+ id        PK                              ON DELETE CASCADE — deleting a
+ email     UNIQUE                          user destroys their tasks
+ password  bcrypt hash only
+ apikey    UNIQUE (256-bit random hex)
+ isadmin   bool
+```
+
+Every task is stamped with its owner's `userid` at creation
+(`CreateTaskInput.UserID` — required and validated against the users table),
+and task list/stats queries are scoped through `TaskFilter.UserID`
+(`nil` = all users, admin scope only).
+
+#### Password storage
+
+- Hashing happens **exclusively** in the application layer
+  (`internal/application/password.go`): `bcrypt` with a per-user random salt,
+  cost 10 in production (`DefaultPasswordCost`), cost 4 in test suites
+  (`TestPasswordCost`).
+- Clear passwords never reach the domain, the repositories, the logs, or any
+  API/HTML response. The REST user DTO exposes only `id`, `email`, `apikey`,
+  `isadmin`.
+- `AuthUser` verifies with `bcrypt.CompareHashAndPassword`; unknown emails and
+  wrong passwords return the **same** generic error (`invalid email or
+  password`), and unknown emails burn one dummy bcrypt comparison so response
+  timing does not reveal whether an account exists.
+
+#### Bootstrap admin seeding
+
+Schema creation (`Dialect.CreateSchema`) inserts the bootstrap admin **only
+when the users table is empty** (idempotent, every backend):
+
+| Field    | Value             |
+|----------|-------------------|
+| Email    | `admin@email.com` |
+| Password | `admin`           |
+| Role     | admin             |
+
+The hash is computed by the shared SQL seed (`internal/repository/sqldb/seed.go`);
+the memory and mongo backends replicate the same policy. The clear password
+`admin` exists only as bcrypt's input — never in storage, logs, or output.
+
+> **Change this password first** — create your own admin in the User
+> Management page (`/app/users`), then demote or delete the bootstrap account.
+> The last remaining admin can never be deleted or demoted.
+
+#### Web session design (`httpweb`)
+
+- `session.go` — a **stateless HMAC-SHA256 signed cookie** (`hexarch_session`)
+  carrying only `userid` + expiry (≤ 24 h). Signing secret:
+  `HEXARCH_SESSION_SECRET`, or a random per-boot secret when unset
+  (documented trade-off: sessions are invalidated on restart).
+- **No privileges in the cookie.** The `requireAuth` middleware re-loads the
+  user from the database on *every* request (`UserByID`, an indexed PK read)
+  and derives `isadmin` and task ownership from that record. Demoted or
+  deleted users lose access on their **next** request — no stale-cookie admin
+  window and no server-side session store.
+- `requireAdmin` guards the `/app/users` pages with the same DB-loaded flag.
+- `csrf.go` — a random token cookie (`hexarch_csrf`) that must be echoed in a
+  hidden form field or the `X-CSRF-Token` header (propagated to every HTMX
+  request via `hx-headers:inherited` on `<body>` — htmx 4 requires the
+  `:inherited` modifier) on every POST/PATCH/DELETE; mismatches get `403`.
+- Unauthenticated page requests redirect to `/app/login?next=…` (same-origin
+  paths only — open-redirect guard).
+
+#### REST auth design (`httpapi`)
+
+A middleware wraps the whole `/api` group (except the public
+`POST /api/login`):
+
+1. `X-API-Key: <key>` header → `UserByAPIKey` (indexed lookup), **or**
+2. `Authorization: Basic base64(email:password)` → `AuthUser` (bcrypt verify).
+
+Anything else → `401` with a `WWW-Authenticate: Basic` challenge and a single
+uniform message (no account enumeration). Regular users are always scoped to
+their own tasks; admins may pass `?user_id=<userid>` to inspect another user
+or `?user_id=all` to span every user.
+
+#### Repository contract
+
+`AuthUser` on the port is deliberately a **lookup by lower-cased email only**
+— bcrypt verification never happens in a backend. The conformance suite
+(`internal/repository/conformance/users.go`) enforces the user contract —
+CRUD, duplicate email/apikey → `Conflict`, ordered-by-email `ListUsers`,
+auth lookup, `UserByAPIKey`, delete-user task cascade, and owner-scoped
+filtering — against every backend.
+
+### Usage
+
+#### Web UI (`hexarch httpweb`)
+
+- Visiting any page redirects to `/app/login` when unauthenticated.
+- Sign in with email + password; you land on the task management page.
+- Admins see an **Admin** link in the navbar leading to the User Management
+  page (`/app/users`): create users, edit email/password/admin role, delete
+  users (with their tasks). You cannot delete your own account, and the last
+  admin cannot be demoted or deleted.
+- Non-admins see no Admin link and get `403` on `/app/users`.
+
+#### REST API (`hexarch httpapi`)
+
+```bash
+# Basic auth
+curl -u admin@email.com:admin http://localhost:8080/api/tasks
+
+# fetch your API key (hash-free response: id, email, apikey, isadmin)
+curl -s -X POST http://localhost:8080/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@email.com","password":"admin"}'
+# → {"id":"…","email":"admin@email.com","apikey":"…","isadmin":true}
+
+# use the API key
+curl -H "X-API-Key: <apikey>" http://localhost:8080/api/tasks
+
+# tasks carry their owner
+curl -u admin@email.com:admin -X POST http://localhost:8080/api/tasks \
+  -H 'Content-Type: application/json' -d '{"title":"Ship v1","priority":5}'
+# → {"id":"…","userid":"<your user id>","title":"Ship v1",…}
+
+# admins may inspect another user's tasks (or ?user_id=all for everyone's)
+curl -u admin@email.com:admin 'http://localhost:8080/api/tasks?user_id=<userid>'
+```
+
+Missing or invalid credentials return `401`; wrong `POST /api/login`
+credentials return `401` with the generic message.
+
+#### CLI (`hexarch cli`)
+
+Every subcommand except `help` requires credentials; the CLI always scopes to
+the authenticated user's own tasks:
+
+```bash
+hexarch cli --email admin@email.com --password admin create --title "Ship it"
+hexarch cli --email admin@email.com --password admin list
+hexarch cli whoami --email admin@email.com --password admin
+# or via environment:
+HEXARCH_EMAIL=admin@email.com HEXARCH_PASSWORD=admin hexarch cli list
+```
+
+> **Breaking change:** CLI invocations that worked before the multi-user
+> update now require `--email`/`--password` (or the env fallbacks
+> `HEXARCH_EMAIL` / `HEXARCH_PASSWORD`).
+
+#### Security properties
+
+| ID | Property |
+|---|---|
+| NFR-1 | Passwords stored only as bcrypt hashes; never logged or rendered. |
+| NFR-2 | One generic auth-failure message; no account enumeration; timing-equalized unknown-email path. |
+| NFR-3 | API keys are 256-bit random hex, unique-indexed in every backend. |
+| NFR-4 | Session cookies: `HttpOnly`, `SameSite=Lax`, `Secure` on TLS, ≤ 24 h; userid only — privileges re-read per request. |
+| NFR-5 | Delete-user cascades to tasks everywhere; self-delete and last-admin delete/demote blocked. |
+| NFR-7 | CSRF tokens on all state-changing web endpoints. |
+| NFR-8 | No password hash or API key material in logs, views, or error messages; API DTOs expose at most `id/email/apikey/isadmin`. |
 
 ---
 

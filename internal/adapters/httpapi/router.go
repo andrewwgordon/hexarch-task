@@ -28,12 +28,16 @@ func NewRouter(svc application.TaskService) *gin.Engine {
 
 	api := r.Group("/api")
 	{
-		api.POST("/tasks", h.create)
-		api.GET("/tasks", h.list)
-		api.GET("/tasks/:id", h.get)
-		api.PATCH("/tasks/:id", h.update)
-		api.DELETE("/tasks/:id", h.delete)
-		api.GET("/stats", h.stats)
+		api.POST("/login", h.login) // public: obtains the apikey via AuthUser
+	}
+	authed := r.Group("/api", authMiddleware(svc))
+	{
+		authed.GET("/tasks", h.list)
+		authed.POST("/tasks", h.create)
+		authed.GET("/tasks/:id", h.get)
+		authed.PATCH("/tasks/:id", h.update)
+		authed.DELETE("/tasks/:id", h.delete)
+		authed.GET("/stats", h.stats)
 	}
 	return r
 }

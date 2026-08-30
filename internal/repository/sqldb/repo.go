@@ -5,15 +5,19 @@
 //
 // Storage conventions: timestamps are Unix seconds; deadlines are stored as
 // 0 when absent (epoch 0); query text is written with `?` placeholders for
-// the Dialect to rebind.
+// the Dialect to rebind. Passwords are stored only as bcrypt hashes; this
+// package never hashes or verifies passwords itself — except for the
+// bootstrap-admin seeding in seed.go, which owns the one-time "admin"
+// hash generation (spec docs/auth.md §3.6).
 //
 // Public API:
 //   - Types:  TaskRepositorySQL
 //   - Funcs:  NewTaskRepositorySQL
-//   - Methods: the seven TaskRepository methods
+//   - Methods: the ten task methods and seven user methods
 //
 // Private:
-//   - taskColumns, countWhere, mapTask, encodeDeadline, decodeDeadline
+//   - taskColumns, userColumns, countWhere, mapTask, mapUser,
+//     encodeDeadline, decodeDeadline
 package sqldb
 
 import (
@@ -26,7 +30,9 @@ import (
 	"hexarch/internal/repository"
 )
 
-const taskColumns = "id, title, description, status, priority, deadline, created_at, updated_at"
+const taskColumns = "id, user_id, title, description, status, priority, deadline, created_at, updated_at"
+
+const userColumns = "id, email, password, apikey, isadmin"
 
 // TaskRepositorySQL is the shared relational implementation of the
 // TaskRepository port, parameterized by a Dialect. Every SQL backend (SQLite,
@@ -45,9 +51,9 @@ func NewTaskRepositorySQL(db *sql.DB, d Dialect) repository.TaskRepository {
 // Create inserts a new task. Unique-constraint violations are mapped to
 // domain.Conflict; any other failure maps to domain.Storage.
 func (r *TaskRepositorySQL) Create(ctx context.Context, t domain.Task) error {
-	query := r.d.Rebind("INSERT INTO tasks (" + taskColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+	query := r.d.Rebind("INSERT INTO tasks (id, user_id, title, description, status, priority, deadline, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	_, err := r.db.ExecContext(ctx, query,
-		t.ID().String(), t.Title(), t.Description(), t.Status().String(),
+		t.ID().String(), t.UserID().String(), t.Title(), t.Description(), t.Status().String(),
 		t.Priority(), encodeDeadline(t.Deadline()), t.CreatedAt().Unix(), t.UpdatedAt().Unix())
 	if err != nil {
 		if r.d.IsUniqueViolation(err) {
@@ -77,6 +83,10 @@ func (r *TaskRepositorySQL) ByID(ctx context.Context, id domain.TaskID) (domain.
 func (r *TaskRepositorySQL) List(ctx context.Context, f repository.TaskFilter) ([]domain.Task, error) {
 	var clauses []string
 	var args []any
+	if f.UserID != nil {
+		clauses = append(clauses, "user_id = ?")
+		args = append(args, f.UserID.String())
+	}
 	if f.Status != nil {
 		clauses = append(clauses, "status = ?")
 		args = append(args, f.Status.String())
@@ -125,14 +135,25 @@ func (r *TaskRepositorySQL) List(ctx context.Context, f repository.TaskFilter) (
 	return out, nil
 }
 
-// Count returns the total number of tasks.
-func (r *TaskRepositorySQL) Count(ctx context.Context) (int, error) {
+// Count returns the total number of tasks, honoring the filter's UserID
+// scope (nil = all users, admin scope).
+func (r *TaskRepositorySQL) Count(ctx context.Context, f repository.TaskFilter) (int, error) {
+	if f.UserID != nil {
+		return r.countWhere(ctx, " WHERE user_id = ?", f.UserID.String())
+	}
 	return r.countWhere(ctx, "")
 }
 
-// CountByStatus returns the number of tasks in the given status.
-func (r *TaskRepositorySQL) CountByStatus(ctx context.Context, status domain.Status) (int, error) {
-	return r.countWhere(ctx, " WHERE status = ?", status.String())
+// CountByStatus returns the number of tasks in the given status, honoring
+// the filter's UserID scope (nil = all users, admin scope).
+func (r *TaskRepositorySQL) CountByStatus(ctx context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
+	clauses := []string{"status = ?"}
+	args := []any{status.String()}
+	if f.UserID != nil {
+		clauses = append([]string{"user_id = ?"}, clauses...)
+		args = append([]any{f.UserID.String()}, args...)
+	}
+	return r.countWhere(ctx, " WHERE "+strings.Join(clauses, " AND "), args...)
 }
 
 // Update persists all mutable fields of an existing task; returning
@@ -194,16 +215,16 @@ func (r *TaskRepositorySQL) countWhere(ctx context.Context, where string, args .
 // hydrator, translating scan/hydration failures into domain.Storage.
 func mapTask(rows *sql.Rows) (domain.Task, error) {
 	var (
-		id, title, description, status string
-		priority                       int
-		deadline                       int64
-		createdAt, updatedAt           int64
+		id, userID, title, description, status string
+		priority                               int
+		deadline                               int64
+		createdAt, updatedAt                   int64
 	)
-	if err := rows.Scan(&id, &title, &description, &status, &priority, &deadline, &createdAt, &updatedAt); err != nil {
+	if err := rows.Scan(&id, &userID, &title, &description, &status, &priority, &deadline, &createdAt, &updatedAt); err != nil {
 		return domain.Task{}, domain.Storage("scan failed: " + err.Error())
 	}
 	t, err := domain.HydrateTask(
-		domain.TaskID(id), title, description, domain.Status(status), priority,
+		domain.TaskID(id), domain.UserID(userID), title, description, domain.Status(status), priority,
 		decodeDeadline(deadline), time.Unix(createdAt, 0), time.Unix(updatedAt, 0))
 	if err != nil {
 		return domain.Task{}, domain.Storage("corrupted row: " + err.Error())

@@ -17,14 +17,14 @@ import (
 )
 
 func TestCreateRejectsEmptyTitle(t *testing.T) {
-	_, err := domain.NewTask(domain.TaskID("id"), "", "d", 0, nil, time.Now())
+	_, err := domain.NewTask(domain.TaskID("id"), "u-1", "", "d", 0, nil, time.Now())
 	if err == nil {
 		t.Fatal("expected error for empty title")
 	}
 }
 
 func TestCreateRejectsOutOfRangePriority(t *testing.T) {
-	_, err := domain.NewTask(domain.TaskID("id"), "ok", "d", 9, nil, time.Now())
+	_, err := domain.NewTask(domain.TaskID("id"), "u-1", "ok", "d", 9, nil, time.Now())
 	if err == nil {
 		t.Fatal("expected error for priority 9")
 	}
@@ -33,7 +33,7 @@ func TestCreateRejectsOutOfRangePriority(t *testing.T) {
 func TestStateMachineRejectsIllegalJump(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
-	task, err := domain.NewTask(domain.TaskID("id1"), "fix bug", "d", 0, nil, now)
+	task, err := domain.NewTask(domain.TaskID("id1"), "u-1", "fix bug", "d", 0, nil, now)
 	if err != nil {
 		t.Fatalf("unexpected creation error: %v", err)
 	}
@@ -64,11 +64,49 @@ func TestStateMachineRejectsIllegalJump(t *testing.T) {
 
 func TestRenameRejectsEmptyTitle(t *testing.T) {
 	now := time.Now()
-	task, err := domain.NewTask(domain.TaskID("id2"), "keep me", "d", 0, nil, now)
+	task, err := domain.NewTask(domain.TaskID("id2"), "u-1", "keep me", "d", 0, nil, now)
 	if err != nil {
 		t.Fatalf("unexpected creation error: %v", err)
 	}
 	if _, err := task.Rename("", now); err == nil {
 		t.Fatal("expected rename to empty title to be rejected")
+	}
+}
+
+// ---- task ownership (phase 2 of docs/auth-plan.md) ----
+
+func TestCreateRequiresOwner(t *testing.T) {
+	_, err := domain.NewTask(domain.TaskID("id"), "", "t", "d", 0, nil, time.Now())
+	if err == nil {
+		t.Fatal("expected error for empty owner")
+	}
+	de, ok := err.(*domain.DomainError)
+	if !ok || de.Kind() != domain.KindInvalid {
+		t.Fatalf("expected KindInvalid, got %v", err)
+	}
+}
+
+func TestHydrateTaskRejectsEmptyOwner(t *testing.T) {
+	_, err := domain.HydrateTask("id", "", "t", "d", domain.StatusTodo, 0, nil, time.Now(), time.Now())
+	if err == nil {
+		t.Fatal("expected error for empty owner")
+	}
+}
+
+func TestTaskOwnerRoundTrip(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	task, err := domain.NewTask("id1", "owner-1", "fix bug", "d", 0, nil, now)
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if task.UserID() != "owner-1" {
+		t.Errorf("UserID() = %q, want owner-1", task.UserID())
+	}
+	h, err := domain.HydrateTask("id1", "owner-1", "fix bug", "d", domain.StatusTodo, 0, nil, now, now)
+	if err != nil {
+		t.Fatalf("HydrateTask: %v", err)
+	}
+	if h := h.UserID(); h != task.UserID() {
+		t.Errorf("hydrated owner %q != created owner %q", h, task.UserID())
 	}
 }

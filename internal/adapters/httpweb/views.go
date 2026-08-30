@@ -193,3 +193,26 @@ func toStatsView(s application.TaskStats, filter repository.TaskFilter, hasTasks
 	}
 	return v
 }
+
+// userView is the presentation-layer view of an authenticated user. It
+// deliberately carries only ID/Email/IsAdmin — the password hash and API key
+// are never rendered (spec NFR-8).
+type userView struct {
+	ID      string
+	Email   string
+	IsAdmin bool
+}
+
+// toUserView converts a domain.User into its safe presentation view.
+func toUserView(u domain.User) userView {
+	return userView{ID: u.ID().String(), Email: u.Email(), IsAdmin: u.IsAdmin()}
+}
+
+// toUserViews converts a user slice into presentation views.
+func toUserViews(users []domain.User) []userView {
+	out := make([]userView, 0, len(users))
+	for _, u := range users {
+		out = append(out, toUserView(u))
+	}
+	return out
+}

@@ -6,6 +6,7 @@
       hx-target="this"
       hx-swap="none"
       hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
   <fieldset class="fieldset">
     <legend class="fieldset-legend">Update</legend>
 

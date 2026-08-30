@@ -40,9 +40,26 @@ type UpdateTaskRequest struct {
 	Deadline json.RawMessage `json:"deadline"`
 }
 
+// LoginRequest is the JSON body accepted by POST /api/login.
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// UserResponse is the JSON representation of a domain.User for API
+// responses. It deliberately exposes id/email/apikey/isadmin only — the
+// bcrypt password hash is never serialized (spec NFR-8).
+type UserResponse struct {
+	ID      string `json:"id"`
+	Email   string `json:"email"`
+	APIKey  string `json:"apikey"`
+	IsAdmin bool   `json:"isadmin"`
+}
+
 // TaskResponse is the JSON representation of a domain.Task.
 type TaskResponse struct {
 	ID          string  `json:"id"`
+	UserID      string  `json:"userid"`
 	Title       string  `json:"title"`
 	Description string  `json:"description"`
 	Status      string  `json:"status"`
@@ -79,6 +96,16 @@ type ErrorBody struct {
 	Message string `json:"message"`
 }
 
+// toUserResponse converts a domain.User into its hash-free JSON form.
+func toUserResponse(u domain.User) UserResponse {
+	return UserResponse{
+		ID:      u.ID().String(),
+		Email:   u.Email(),
+		APIKey:  u.APIKey(),
+		IsAdmin: u.IsAdmin(),
+	}
+}
+
 // ---- conversions: service input <- request ----
 
 // toCreateInput converts a validated create request into the application input.
@@ -108,6 +135,7 @@ func toTaskResponse(t domain.Task) TaskResponse {
 	}
 	return TaskResponse{
 		ID:          t.ID().String(),
+		UserID:      t.UserID().String(),
 		Title:       t.Title(),
 		Description: t.Description(),
 		Status:      t.Status().String(),

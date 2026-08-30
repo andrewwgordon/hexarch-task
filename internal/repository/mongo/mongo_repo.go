@@ -7,11 +7,11 @@
 //
 // Public API:
 //   - Types:  TaskRepositoryMongo
-//   - Methods: the seven TaskRepository methods
+//   - Methods: the ten task methods and seven user methods
 //
 // Private:
 //   - provider, disconnectCloser, dbName
-//   - taskDoc, toDoc, fromDoc, ensureIndexes
+//   - taskDoc, toDoc, fromDoc, ensureIndexes, ensureUserIndexes
 package mongo
 
 import (
@@ -63,6 +63,14 @@ func (provider) Open(ctx context.Context, uri string) (repository.TaskRepository
 		client.Disconnect(context.Background())
 		return nil, nil, fmt.Errorf("mongodb: indexes: %w", err)
 	}
+	if err := r.ensureUserIndexes(ctx); err != nil {
+		client.Disconnect(context.Background())
+		return nil, nil, fmt.Errorf("mongodb: user indexes: %w", err)
+	}
+	if err := r.seedAdminMongo(ctx); err != nil {
+		client.Disconnect(context.Background())
+		return nil, nil, fmt.Errorf("mongodb: seed: %w", err)
+	}
 	return r, disconnectCloser{client}, nil
 }
 
@@ -97,6 +105,7 @@ type TaskRepositoryMongo struct {
 // taskDoc is the durable representation of a task in MongoDB.
 type taskDoc struct {
 	ID          string     `bson:"_id"`
+	UserID      string     `bson:"userid"`
 	Title       string     `bson:"title"`
 	Description string     `bson:"description"`
 	Status      string     `bson:"status"`
@@ -110,6 +119,7 @@ type taskDoc struct {
 func toDoc(t domain.Task) taskDoc {
 	return taskDoc{
 		ID:          t.ID().String(),
+		UserID:      t.UserID().String(),
 		Title:       t.Title(),
 		Description: t.Description(),
 		Status:      t.Status().String(),
@@ -124,7 +134,7 @@ func toDoc(t domain.Task) taskDoc {
 // stored values through the domain hydrator.
 func fromDoc(doc taskDoc) (domain.Task, error) {
 	t, err := domain.HydrateTask(
-		domain.TaskID(doc.ID), doc.Title, doc.Description, domain.Status(doc.Status),
+		domain.TaskID(doc.ID), domain.UserID(doc.UserID), doc.Title, doc.Description, domain.Status(doc.Status),
 		doc.Priority, doc.Deadline, doc.CreatedAt, doc.UpdatedAt)
 	if err != nil {
 		return domain.Task{}, domain.Storage("corrupted document: " + err.Error())
@@ -172,6 +182,9 @@ func (r *TaskRepositoryMongo) ByID(ctx context.Context, id domain.TaskID) (domai
 // paging contract as the SQL backends: priority desc, then created_at desc.
 func (r *TaskRepositoryMongo) List(ctx context.Context, f repository.TaskFilter) ([]domain.Task, error) {
 	filter := bson.M{}
+	if f.UserID != nil {
+		filter["userid"] = f.UserID.String()
+	}
 	if f.Status != nil {
 		filter["status"] = f.Status.String()
 	}
@@ -219,18 +232,28 @@ func (r *TaskRepositoryMongo) List(ctx context.Context, f repository.TaskFilter)
 	return out, nil
 }
 
-// Count returns the total number of documents in the collection.
-func (r *TaskRepositoryMongo) Count(ctx context.Context) (int, error) {
-	n, err := r.coll.CountDocuments(ctx, bson.M{})
+// Count returns the total number of documents in the collection, honoring
+// the filter's UserID scope (nil = all users, admin scope).
+func (r *TaskRepositoryMongo) Count(ctx context.Context, f repository.TaskFilter) (int, error) {
+	filter := bson.M{}
+	if f.UserID != nil {
+		filter["userid"] = f.UserID.String()
+	}
+	n, err := r.coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, domain.Storage("count failed: " + err.Error())
 	}
 	return int(n), nil
 }
 
-// CountByStatus returns the number of documents in the given status.
-func (r *TaskRepositoryMongo) CountByStatus(ctx context.Context, status domain.Status) (int, error) {
-	n, err := r.coll.CountDocuments(ctx, bson.M{"status": status.String()})
+// CountByStatus returns the number of documents in the given status, honoring
+// the filter's UserID scope (nil = all users, admin scope).
+func (r *TaskRepositoryMongo) CountByStatus(ctx context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
+	filter := bson.M{"status": status.String()}
+	if f.UserID != nil {
+		filter["userid"] = f.UserID.String()
+	}
+	n, err := r.coll.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, domain.Storage("count failed: " + err.Error())
 	}

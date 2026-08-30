@@ -5,12 +5,14 @@
 //
 // This file (task.go) defines the Task value object: the TaskID and Status
 // types, the legal status transitions, the creation/hydration factories, and
-// the immutable "return a copy" business methods.
+// the immutable "return a copy" business methods. A Task is owned by exactly
+// one User (1-to-many User→Task); the owner is stamped at creation and never
+// changes.
 //
 // Public API:
-//   - Types:     TaskID, Status, Task, MinPriority, MaxPriority
+//   - Types:   TaskID, Status, Task, UserID, User, MinPriority, MaxPriority
 //   - Functions: NewTask, HydrateTask
-//   - Methods:   value accessors; CanEdit; and the copy-returning mutators
+//   - Methods: value accessors; CanEdit; and the copy-returning mutators
 //     WithStatus, Rename, WithPriority, WithDeadline, ClearDeadline
 //
 // Unexported:
@@ -61,6 +63,7 @@ const (
 // no dependency on any storage engine, network, or UI framework.
 type Task struct {
 	id        TaskID
+	userid    UserID
 	title     string
 	desc      string
 	status    Status
@@ -78,6 +81,10 @@ type Task struct {
 
 // ID returns the task's opaque identity.
 func (t Task) ID() TaskID { return t.id }
+
+// UserID returns the owner's identity (always non-empty; every task has an
+// owner).
+func (t Task) UserID() UserID { return t.userid }
 
 // Title returns the task's title.
 func (t Task) Title() string { return t.title }
@@ -104,8 +111,12 @@ func (t Task) UpdatedAt() time.Time { return t.updatedAt }
 // ---- Factories ----
 
 // NewTask builds a brand-new task. It is used by the application layer when
-// creating a task; status is always "todo".
-func NewTask(id TaskID, title, description string, priority int, deadline *time.Time, now time.Time) (Task, error) {
+// creating a task; status is always "todo". The owner (userid) is required —
+// every task belongs to exactly one user.
+func NewTask(id TaskID, userid UserID, title, description string, priority int, deadline *time.Time, now time.Time) (Task, error) {
+	if userid == "" {
+		return Task{}, Invalid("task must have an owner")
+	}
 	if title == "" {
 		return Task{}, Invalid("title must not be empty")
 	}
@@ -113,7 +124,7 @@ func NewTask(id TaskID, title, description string, priority int, deadline *time.
 		return Task{}, Invalid(fmt.Sprintf("priority must be between %d and %d", MinPriority, MaxPriority))
 	}
 	return Task{
-		id: id, title: title, desc: description,
+		id: id, userid: userid, title: title, desc: description,
 		status: StatusTodo, priority: priority, deadline: deadline,
 		createdAt: now, updatedAt: now,
 	}, nil
@@ -121,12 +132,15 @@ func NewTask(id TaskID, title, description string, priority int, deadline *time.
 
 // HydrateTask rebuilds an existing task from a durable representation. It is
 // the inverse of NewTask and validates the stored status string.
-func HydrateTask(id TaskID, title, description string, status Status, priority int, deadline *time.Time, createdAt, updatedAt time.Time) (Task, error) {
+func HydrateTask(id TaskID, userid UserID, title, description string, status Status, priority int, deadline *time.Time, createdAt, updatedAt time.Time) (Task, error) {
+	if userid == "" {
+		return Task{}, Invalid("corrupted record: empty owner")
+	}
 	if title == "" {
 		return Task{}, Invalid("corrupted record: empty title")
 	}
 	return Task{
-		id: id, title: title, desc: description,
+		id: id, userid: userid, title: title, desc: description,
 		status: status, priority: priority, deadline: deadline,
 		createdAt: createdAt, updatedAt: updatedAt,
 	}, nil
