@@ -1,0 +1,77 @@
+{{ define "partials/modal_js.html" }}
+{{/* Centralized dialog lifecycle for HTMX-driven modals (htmx 4).
+
+     This replaces the per-element inline JavaScript that used to live on
+     every modal button and form. It relies on the htmx 4 event payload:
+     events carry `detail.ctx` (not `detail.elt`), where ctx.sourceElement,
+     ctx.target and ctx.response are available.
+
+       * Opening   — [data-modal="#id"] buttons open the named dialog.
+                     Modal bodies loaded with hx-get into an element inside a
+                     <dialog> open it automatically after the swap.
+       * Closing   — [data-close] buttons close their dialog; a successful
+                     (status < 400) HTMX form submission from inside a dialog
+                     closes that dialog.
+       * Errors    — the previous inline error is cleared when a modal form
+                     starts a request; the form itself targets its
+                     [data-modal-error] container via hx-status:2xx
+                     (success swaps nothing, errors render the alert). */}}
+<script>
+  (function () {
+    "use strict";
+
+    function ctxOf(evt) {
+      return evt.detail && evt.detail.ctx;
+    }
+    function dialogFor(el) {
+      return el && el.closest ? el.closest("dialog") : null;
+    }
+
+    // Open the dialog named by a [data-modal] trigger; close on [data-close].
+    document.addEventListener("click", function (evt) {
+      var t = evt.target;
+      if (!t || !t.closest) return;
+      var trigger = t.closest("[data-modal]");
+      if (trigger) {
+        var dlg = document.getElementById(trigger.getAttribute("data-modal"));
+        if (dlg) dlg.showModal();
+        return;
+      }
+      var closer = t.closest("[data-close]");
+      if (closer) {
+        var d = dialogFor(closer);
+        if (d) d.close();
+      }
+    });
+
+    // Clear the previous inline error when a modal form starts a request.
+    document.addEventListener("htmx:before:request", function (evt) {
+      var ctx = ctxOf(evt);
+      var form = ctx && ctx.sourceElement;
+      if (!form || form.tagName !== "FORM") return;
+      var dlg = dialogFor(form);
+      if (!dlg) return;
+      var err = dlg.querySelector("[data-modal-error]");
+      if (err) err.replaceChildren();
+    });
+
+    // A modal body swapped in by hx-get opens its containing dialog.
+    document.addEventListener("htmx:after:swap", function (evt) {
+      var ctx = ctxOf(evt);
+      var dlg = dialogFor(ctx && ctx.target);
+      if (dlg && !dlg.open) dlg.showModal();
+    });
+
+    // A successful mutation submitted from a dialog form closes the dialog.
+    document.addEventListener("htmx:after:request", function (evt) {
+      var ctx = ctxOf(evt);
+      if (!ctx || !ctx.response) return;
+      if (ctx.response.status >= 400) return;
+      var form = ctx.sourceElement;
+      if (!form || form.tagName !== "FORM") return;
+      var dlg = dialogFor(form);
+      if (dlg && dlg.open) dlg.close();
+    });
+  }());
+</script>
+{{ end }}

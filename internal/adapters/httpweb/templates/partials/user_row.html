@@ -19,7 +19,6 @@
               hx-get="/app/users/{{ .ID }}/edit"
               hx-target="#user-edit-modal-box"
               hx-swap="innerHTML"
-              hx-on::after:request="if(event.detail.ctx.response.status < 400) document.getElementById('modal-user-edit').showModal()"
               aria-label="Edit user" title="Edit">✏️</button>
 
       {{ if ne .ID $cur }}
@@ -27,7 +26,6 @@
               hx-get="/app/users/{{ .ID }}/delete"
               hx-target="#user-delete-modal-box"
               hx-swap="innerHTML"
-              hx-on::after:request="if(event.detail.ctx.response.status < 400) document.getElementById('modal-user-delete').showModal()"
               aria-label="Delete user" title="Delete">🗑️</button>
       {{ end }}
     </div>

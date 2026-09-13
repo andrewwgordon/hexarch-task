@@ -1,11 +1,12 @@
 {{ define "partials/modal_edit.html" }}
 <h3 class="text-lg font-bold mb-4">Edit task</h3>
-<div id="modal-edit-error"></div>
+<div id="modal-edit-error" data-modal-error></div>
 <form method="post" action="/app/tasks/{{ .Task.ID }}"
       hx-patch="/app/tasks/{{ .Task.ID }}"
-      hx-target="this"
-      hx-swap="none"
-      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+      hx-target="#modal-edit-error"
+      hx-swap="innerHTML"
+      hx-status:2xx="swap:none"
+      hx-disable="find button[type=submit]">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
   <fieldset class="fieldset">
     <legend class="fieldset-legend">Update</legend>
@@ -37,7 +38,7 @@
     <button type="submit" class="btn btn-primary btn-block">Save</button>
   </div>
   <div class="modal-action">
-    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-edit').close()">Cancel</button>
+    <button type="button" class="btn btn-ghost" data-close>Cancel</button>
   </div>
 </form>
 {{ end }}

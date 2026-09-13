@@ -1,40 +1,12 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>To Do</title>
-
-  <!-- 1. DaisyUI v5 Stylesheet -->
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
-  <!-- 2. Tailwind CSS v4 Browser Engine -->
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-  <!-- 3. HTMX v4.0.0 -->
-  <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0"
-          integrity="sha384-BvJpBiO8Kh31EqtJe5DRIeWrHWnCGkwytKs9NKFi86Hhw96dEqdEMzZDeK9iEGTc"
-          crossorigin="anonymous"></script>
-</head>
+{{ template "partials/head.html" . }}
 <body class="bg-base-200 min-h-screen text-base-content"
       hx-headers:inherited='{"X-CSRF-Token": "{{ .CSRF }}"}'>
   <div class="max-w-5xl mx-auto p-4">
 
     <!-- Navbar -->
-    <div class="navbar bg-base-100 rounded-box shadow px-4 mb-4">
-      <div class="navbar-start">
-        <a class="text-lg font-bold text-primary" href="/app/">To Do</a>
-      </div>
-      <div class="navbar-end">
-        {{ if .User.Email }}
-        {{ if .User.IsAdmin }}
-        <a class="btn btn-sm btn-ghost" href="/app/users">Admin</a>
-        {{ end }}
-        <span class="text-sm opacity-70 mr-2">{{ .User.Email }}</span>
-        <a class="btn btn-sm btn-ghost" href="/app/logout">Logout</a>
-        {{ end }}
-        {{ template "partials/theme_toggle.html" . }}
-        <button type="button" class="btn btn-primary" onclick="modal_create.showModal()">+ New Task</button>
-      </div>
-    </div>
+    {{ template "partials/navbar.html" . }}
 
     <!-- Stats -->
     <div id="stats" class="mb-4">
@@ -80,7 +52,7 @@
           </svg>
         </a>
 
-        <span class="text-sm text-base-content/60 whitespace-nowrap" id="list-count">{{ .List.FilteredCount }} tasks</span>
+        <span class="text-sm text-base-content/60 whitespace-nowrap" id="list-count">{{ .List.PageCount }} shown</span>
         <span id="list-loading" class="loading loading-spinner loading-sm htmx-indicator"></span>
       </form>
     </div>
@@ -93,7 +65,7 @@
   </div>
 
   <!-- Create dialog -->
-  <dialog id="modal_create" class="modal">
+  <dialog id="modal-create" class="modal">
     <div class="modal-box">
       {{ template "partials/modal_create.html" . }}
     </div>
@@ -117,7 +89,8 @@
   </dialog>
 
   <!-- Toast region -->
-  <div class="toast toast-end" id="toast"></div>
+  <div class="toast toast-end" id="toast" role="status" aria-live="polite"></div>
 
+  {{ template "partials/modal_js.html" . }}
 </body>
 </html>

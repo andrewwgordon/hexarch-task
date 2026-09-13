@@ -1,11 +1,12 @@
 {{ define "partials/modal_create.html" }}
 <h3 class="text-lg font-bold mb-4">New task</h3>
-<div id="modal-create-error"></div>
+<div id="modal-create-error" data-modal-error></div>
 <form method="post" action="/app/tasks"
       hx-post="/app/tasks"
-      hx-target="this"
-      hx-swap="none"
-      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+      hx-target="#modal-create-error"
+      hx-swap="innerHTML"
+      hx-status:2xx="swap:none"
+      hx-disable="find button[type=submit]">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
   <fieldset class="fieldset">
     <legend class="fieldset-legend">Details</legend>
@@ -36,7 +37,7 @@
     <button type="submit" class="btn btn-primary btn-block">Create</button>
   </div>
   <div class="modal-action">
-    <button type="button" class="btn btn-ghost" onclick="modal_create.close()">Cancel</button>
+    <button type="button" class="btn btn-ghost" data-close>Cancel</button>
   </div>
 </form>
 {{ end }}

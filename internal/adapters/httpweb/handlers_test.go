@@ -171,6 +171,68 @@ func TestWebIndexRenders(t *testing.T) {
 	}
 }
 
+// TestWebSharedShellAndModalContract locks in the template refactor: the
+// head/navbar partials are the single source of the version pins and shell
+// data, and the modal lifecycle is centralized in partials/modal_js.html
+// rather than per-element inline handlers.
+func TestWebSharedShellAndModalContract(t *testing.T) {
+	// Public login shell: shared head, but HTMX is deliberately not loaded.
+	r := newWebEngine(t)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/app/login", nil))
+	login := w.Body.String()
+	if !strings.Contains(login, "<title>Sign in — To Do</title>") {
+		t.Errorf("login missing shared head title")
+	}
+	if strings.Contains(login, "htmx.org@4.0.0") {
+		t.Errorf("login should not load HTMX")
+	}
+	if strings.Contains(login, "data-modal") {
+		t.Errorf("login navbar should not offer a modal action")
+	}
+
+	// Authenticated shell: version pins, navbar action, CSRF header and the
+	// centralized modal script all come from the shared partials.
+	_, c := newWebSession(t)
+	idx := c.do(t, "GET", "/app/", false, nil)
+	if idx.Code != http.StatusOK {
+		t.Fatalf("index status = %d", idx.Code)
+	}
+	body := idx.Body.String()
+	for _, want := range []string{
+		"<title>To Do</title>",
+		"htmx.org@4.0.0",            // head partial pins HTMX
+		`data-modal="modal-create"`, // navbar action
+		"hx-headers:inherited",      // CSRF header for DELETE requests
+		"data-modal-error",          // create-form error region
+		`hx-status:2xx="swap:none"`, // success swaps only <hx-partial>
+		"htmx:after:swap",           // modal_js open handler
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("index missing %q", want)
+		}
+	}
+	if strings.Contains(body, "onclick=") || strings.Contains(body, "hx-on:") {
+		t.Errorf("index still contains per-element inline JS")
+	}
+
+	// Admin shell: shared navbar with the user-management action.
+	uw := c.do(t, "GET", "/app/users", false, nil)
+	if uw.Code != http.StatusOK {
+		t.Fatalf("users status = %d", uw.Code)
+	}
+	users := uw.Body.String()
+	if !strings.Contains(users, "<title>User Management — To Do</title>") {
+		t.Errorf("users missing shared head title")
+	}
+	if !strings.Contains(users, `data-modal="modal-user-create"`) {
+		t.Errorf("users missing shared navbar action")
+	}
+	if !strings.Contains(users, "admin@email.com") {
+		t.Errorf("users navbar missing the signed-in email")
+	}
+}
+
 func TestWebIndexEmptyState(t *testing.T) {
 	_, c := newWebSession(t)
 	w := c.do(t, "GET", "/app/", false, nil)
@@ -461,6 +523,51 @@ func TestWebCreatePriorityOutOfRange(t *testing.T) {
 	w := c.do(t, "POST", "/app/tasks", true, form)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("create out-of-range priority status = %d, want 400", w.Code)
+	}
+}
+
+func TestWebCreateInvalidDeadline(t *testing.T) {
+	_, c := newWebSession(t)
+	form := url.Values{"title": {"t"}, "deadline": {"not-a-date"}}
+	w := c.do(t, "POST", "/app/tasks", true, form)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create invalid deadline status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "deadline must look like") {
+		t.Errorf("expected deadline error message: %s", w.Body.String())
+	}
+}
+
+func TestWebStatsInvalidOffset(t *testing.T) {
+	_, c := newWebSession(t)
+	w := c.do(t, "GET", "/app/stats?offset=abc", true, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("stats invalid offset status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestWebLogoutRequiresPost(t *testing.T) {
+	r := newWebEngine(t)
+	c := newLoggedInClient(t, r, "admin@email.com", "admin")
+
+	// Logout is a state change: the convenience GET route is gone.
+	if w := c.do(t, "GET", "/app/logout", false, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("GET logout status = %d, want 404", w.Code)
+	}
+
+	// POST with the CSRF token succeeds and expires the session cookie.
+	w := c.do(t, "POST", "/app/logout", false, url.Values{})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("POST logout status = %d, want 303; body=%s", w.Code, w.Body.String())
+	}
+	cleared := false
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == "hexarch_session" && ck.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("logout did not clear the session cookie: %v", w.Result().Cookies())
 	}
 }
 

@@ -78,9 +78,6 @@ func (s *TaskServiceImpl) CreateTask(ctx context.Context, input CreateTaskInput)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if err != nil {
-		return domain.Task{}, err
-	}
 	if err := s.repo.Create(ctx, task); err != nil {
 		return domain.Task{}, err
 	}

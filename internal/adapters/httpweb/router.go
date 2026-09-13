@@ -57,7 +57,6 @@ func NewRouter(svc application.TaskService) (*gin.Engine, error) {
 		// Public: authentication.
 		web.GET("/login", h.loginForm)
 		web.POST("/login", h.login)
-		web.GET("/logout", h.logout)
 		web.POST("/logout", h.logout)
 
 		// Authenticated: task management (per-user scope; admin sees all).

@@ -1,0 +1,25 @@
+{{ define "partials/navbar.html" }}
+{{/* Shared navbar for every page shell. The caller supplies:
+       .User            userView (zero value on the login page)
+       .NavSection      optional subtitle (e.g. "User Management")
+       .NavActionLabel  optional primary action label (e.g. "+ New Task")
+       .NavActionModal  id of the <dialog> the action opens
+     The action button is wired by partials/modal_js.html via [data-modal]. */}}
+<div class="navbar bg-base-100 rounded-box shadow px-4 mb-4">
+  <div class="navbar-start">
+    <a class="text-lg font-bold text-primary" href="/app/">To Do</a>
+    {{ if .NavSection }}<span class="ml-4 text-sm font-semibold opacity-80">{{ .NavSection }}</span>{{ end }}
+  </div>
+  <div class="navbar-end">
+    {{ if .User.Email }}
+    {{ if .User.IsAdmin }}<a class="btn btn-sm btn-ghost" href="/app/users">Admin</a>{{ end }}
+    <span class="text-sm opacity-70 mr-2">{{ .User.Email }}</span>
+    {{ template "partials/logout.html" . }}
+    {{ end }}
+    {{ template "partials/theme_toggle.html" . }}
+    {{ if .NavActionLabel }}
+    <button type="button" class="btn btn-primary btn-sm" data-modal="{{ .NavActionModal }}">{{ .NavActionLabel }}</button>
+    {{ end }}
+  </div>
+</div>
+{{ end }}

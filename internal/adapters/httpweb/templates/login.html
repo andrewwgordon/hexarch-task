@@ -1,25 +1,11 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="light">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in — To Do</title>
-
-  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-</head>
+{{ template "partials/head.html" . }}
 <body class="bg-base-200 min-h-screen text-base-content flex flex-col">
   <div class="max-w-5xl mx-auto w-full p-4">
 
     <!-- Navbar -->
-    <div class="navbar bg-base-100 rounded-box shadow px-4 mb-4">
-      <div class="navbar-start">
-        <a class="text-lg font-bold text-primary" href="/app/">To Do</a>
-      </div>
-      <div class="navbar-end">
-        {{ template "partials/theme_toggle.html" . }}
-      </div>
-    </div>
+    {{ template "partials/navbar.html" . }}
 
   </div>
 

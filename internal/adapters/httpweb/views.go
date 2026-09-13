@@ -52,19 +52,19 @@ type taskView struct {
 
 // listPage is the data bag for the task list fragment.
 type listPage struct {
-	Tasks         []taskView
-	Total         int
-	Page          int
-	PageSize      int
-	HasPrev       bool
-	HasNext       bool
-	PrevOffset    int
-	NextOffset    int
-	StatusFilter  string
-	Search        string
-	FilteredCount int
-	ShowEmpty     bool // no tasks at all (empty state #1)
-	NoMatch       bool // filters matched nothing (empty state #2)
+	Tasks        []taskView
+	Total        int
+	Page         int
+	PageSize     int
+	HasPrev      bool
+	HasNext      bool
+	PrevOffset   int
+	NextOffset   int
+	StatusFilter string
+	Search       string
+	PageCount    int
+	ShowEmpty    bool // no tasks at all (empty state #1)
+	NoMatch      bool // filters matched nothing (empty state #2)
 }
 
 // statsView is the data bag for the stats strip.
@@ -144,21 +144,21 @@ func toTaskViews(tasks []domain.Task) []taskView {
 	return out
 }
 
-// toListPage builds a listPage from tasks, the total filtered count, and the
-// requested filter. totalTasks is the repository-wide total (for the "no
-// tasks at all" empty state).
-func toListPage(tasks []domain.Task, filter repository.TaskFilter, filteredCount, totalTasks int) listPage {
+// toListPage builds a listPage from tasks, the page count, and the requested
+// filter. totalTasks is the repository-wide total (for the "no tasks at all"
+// empty state); pageCount is the number of tasks rendered on this page.
+func toListPage(tasks []domain.Task, filter repository.TaskFilter, pageCount, totalTasks int) listPage {
 	page := filter.Offset/filter.Limit + 1
 	p := listPage{
-		Tasks:         toTaskViews(tasks),
-		Total:         totalTasks,
-		Page:          page,
-		PageSize:      filter.Limit,
-		HasPrev:       page > 1,
-		HasNext:       len(tasks) == filter.Limit,
-		FilteredCount: filteredCount,
-		ShowEmpty:     totalTasks == 0,
-		NoMatch:       totalTasks > 0 && len(tasks) == 0,
+		Tasks:     toTaskViews(tasks),
+		Total:     totalTasks,
+		Page:      page,
+		PageSize:  filter.Limit,
+		HasPrev:   page > 1,
+		HasNext:   len(tasks) == filter.Limit,
+		PageCount: pageCount,
+		ShowEmpty: totalTasks == 0,
+		NoMatch:   totalTasks > 0 && len(tasks) == 0,
 	}
 	if p.HasPrev {
 		p.PrevOffset = (page - 2) * filter.Limit

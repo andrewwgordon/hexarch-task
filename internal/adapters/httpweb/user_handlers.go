@@ -29,10 +29,15 @@ func (h *handlers) usersList(c *gin.Context) {
 	}
 	markVary(c)
 	c.HTML(http.StatusOK, "users.html", gin.H{
-		"Users":       toUserViews(users),
-		"CurrentID":   currentUser(c).ID().String(),
-		"CurrentUser": currentUser(c).Email(),
-		"CSRF":        ensureCSRFToken(c),
+		"Title":          "User Management — To Do",
+		"HTMX":           true,
+		"NavSection":     "User Management",
+		"NavActionLabel": "+ New User",
+		"NavActionModal": "modal-user-create",
+		"User":           toUserView(currentUser(c)),
+		"Users":          toUserViews(users),
+		"CurrentID":      currentUser(c).ID().String(),
+		"CSRF":           ensureCSRFToken(c),
 	})
 }
 

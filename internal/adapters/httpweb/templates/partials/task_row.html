@@ -15,7 +15,7 @@
 
   <div class="flex flex-wrap items-center gap-1 justify-end">
     {{ range $t.Transitions }}
-    <form hx-post="/app/tasks/{{ $t.ID }}/status" hx-target="this" hx-swap="none" class="inline">
+    <form hx-post="/app/tasks/{{ $t.ID }}/status" hx-target="this" hx-swap="none" hx-disable="find button" class="inline">
       <input type="hidden" name="status" value="{{ .Target }}" />
       <button type="submit" class="{{ .ButtonClass }}">{{ .Label }}</button>
     </form>
@@ -26,7 +26,6 @@
             hx-get="/app/tasks/{{ $t.ID }}/edit"
             hx-target="#edit-modal-box"
             hx-swap="innerHTML"
-            hx-on::after:request="if(event.detail.ctx.response.status < 400) document.getElementById('modal-edit').showModal()"
             aria-label="Edit task" title="Edit">✏️</button>
     {{ end }}
 
@@ -35,7 +34,6 @@
             hx-get="/app/tasks/{{ $t.ID }}/delete"
             hx-target="#delete-modal-box"
             hx-swap="innerHTML"
-            hx-on::after:request="if(event.detail.ctx.response.status < 400) document.getElementById('modal-delete').showModal()"
             aria-label="Delete task" title="Delete">🗑️</button>
     {{ end }}
   </div>

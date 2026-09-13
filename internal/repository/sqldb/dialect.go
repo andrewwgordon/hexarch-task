@@ -83,9 +83,6 @@ func (SQLite) CreateSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, createUsers); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, createUsers); err != nil {
-		return err
-	}
 	// Seed the admin BEFORE migrating tasks, so the backfill target exists.
 	if err := seedAdmin(ctx, db); err != nil {
 		return err

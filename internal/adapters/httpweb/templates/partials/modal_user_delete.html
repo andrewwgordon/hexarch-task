@@ -7,15 +7,16 @@
   <span class="block mt-2 text-error">You cannot delete your own account.</span>
   {{ end }}
 </p>
-<div id="modal-user-delete-error"></div>
+<div id="modal-user-delete-error" data-modal-error></div>
 <form method="post" action="/app/users/{{ .User.ID }}"
       hx-delete="/app/users/{{ .User.ID }}"
-      hx-target="this"
-      hx-swap="none"
-      hx-on::after:request="if(event.detail.ctx.response.status < 400) this.closest('dialog').close()">
+      hx-target="#modal-user-delete-error"
+      hx-swap="innerHTML"
+      hx-status:2xx="swap:none"
+      hx-disable="find button[type=submit]">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
   <div class="modal-action">
-    <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal-user-delete').close()">Cancel</button>
+    <button type="button" class="btn btn-ghost" data-close>Cancel</button>
     {{ if ne .User.ID $.CurrentID }}
     <button type="submit" class="btn btn-error">Delete</button>
     {{ end }}

@@ -21,7 +21,6 @@ func writeError(c *gin.Context, err error) {
 		return
 	}
 	status, _, msg := httpconv.ExtractStatusAndMessage(err)
-	c.Status(status)
 	c.HTML(status, "partials/error_alert.html", gin.H{"message": msg})
 	c.Abort()
 }

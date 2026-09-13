@@ -1,0 +1,19 @@
+{{ define "partials/head.html" }}
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ .Title }}</title>
+
+  {{/* Single source of truth for the front-end version pins. Every page
+       shell includes this partial, so daisyUI / Tailwind / HTMX are upgraded
+       in exactly one place. HTMX is loaded only on pages that use it
+       (set .HTMX), keeping the public login page lean. */}}
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  {{ if .HTMX }}
+  <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.0"
+          integrity="sha384-BvJpBiO8Kh31EqtJe5DRIeWrHWnCGkwytKs9NKFi86Hhw96dEqdEMzZDeK9iEGTc"
+          crossorigin="anonymous"></script>
+  {{ end }}
+</head>
+{{ end }}

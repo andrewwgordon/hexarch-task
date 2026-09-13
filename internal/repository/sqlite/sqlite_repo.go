@@ -3,9 +3,8 @@
 // the shared sqldb.TaskRepositorySQL core with the SQLite dialect. The
 // provider is registered with the repository factory as TypeSQLite.
 //
-// Public API:
-//   - Funcs: CreateSchema, NewTaskRepositorySQLite (legacy compatibility
-//     helpers delegating to the shared core)
+// Public API: (none — the package is imported for its registration side
+// effect; provider is unexported)
 //
 // Private:
 //   - provider with Open (self-registration)
@@ -58,17 +57,4 @@ func (provider) Open(ctx context.Context, uri string) (repository.TaskRepository
 		return nil, nil, fmt.Errorf("sqlite: schema: %w", err)
 	}
 	return sqldb.NewTaskRepositorySQL(db, sqldb.SQLite{}), db, nil
-}
-
-// CreateSchema is kept for backward compatibility; it delegates to the SQLite
-// dialect.
-func CreateSchema(db *sql.DB) error {
-	return (sqldb.SQLite{}).CreateSchema(context.Background(), db)
-}
-
-// NewTaskRepositorySQLite is kept for backward compatibility; it wires the
-// shared SQL implementation onto a live sql.DB handle with the SQLite
-// dialect.
-func NewTaskRepositorySQLite(db *sql.DB) repository.TaskRepository {
-	return sqldb.NewTaskRepositorySQL(db, sqldb.SQLite{})
 }

@@ -1,0 +1,8 @@
+{{ define "partials/logout.html" }}
+{{/* Logout is a POST (state change), so it carries the CSRF token. The
+     hidden field also makes the form work without JavaScript. */}}
+<form method="post" action="/app/logout" class="inline-flex">
+  <input type="hidden" name="csrf_token" value="{{ .CSRF }}" />
+  <button type="submit" class="btn btn-sm btn-ghost">Logout</button>
+</form>
+{{ end }}

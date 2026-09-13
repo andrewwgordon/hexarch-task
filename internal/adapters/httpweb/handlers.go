@@ -10,7 +10,7 @@
 // Private:
 //   - handlers, newHandlers
 //   - detection:  isHX, markVary
-//   - data:       pageData, listAndTotal
+//   - data:       listAndTotal
 //   - handlers:   index, list, stats, create, editForm, update,
 //     changeStatus, deleteForm, delete, empty, writeMutation
 //   - helpers:    optionalDeadline, postPriority
@@ -18,6 +18,7 @@ package httpweb
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -56,32 +57,20 @@ func (h *handlers) loginForm(c *gin.Context) {
 			}
 		}
 	}
-	markVary(c)
-	c.HTML(http.StatusOK, "login.html", gin.H{
-		"CSRF": ensureCSRFToken(c),
-		"Next": sanitizeNext(c.Query("next")),
-	})
+	h.renderLogin(c, http.StatusOK, c.Query("next"), "")
 }
 
 // login handles POST /app/login: verifies CSRF, calls AuthUser, issues the
 // session cookie, and redirects (PRG) to the requested page or /app/.
 func (h *handlers) login(c *gin.Context) {
 	if !verifyCSRF(c) {
-		c.HTML(http.StatusForbidden, "login.html", gin.H{
-			"CSRF": ensureCSRFToken(c),
-			"Next": sanitizeNext(c.PostForm("next")),
-		})
+		h.renderLogin(c, http.StatusForbidden, c.PostForm("next"), "")
 		return
 	}
 	user, err := h.svc.AuthUser(c.Request.Context(), c.PostForm("email"), c.PostForm("password"))
 	if err != nil {
 		// Same generic message for unknown email and wrong password (NFR-2).
-		markVary(c)
-		c.HTML(http.StatusUnauthorized, "login.html", gin.H{
-			"CSRF":    ensureCSRFToken(c),
-			"Next":    sanitizeNext(c.PostForm("next")),
-			"message": "invalid email or password",
-		})
+		h.renderLogin(c, http.StatusUnauthorized, c.PostForm("next"), "invalid email or password")
 		return
 	}
 	c.SetCookie(sessionCookieName, h.sm.issue(user.ID(), time.Now()),
@@ -89,11 +78,27 @@ func (h *handlers) login(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, sanitizeNext(c.PostForm("next")))
 }
 
-// logout handles GET and POST /app/logout: clears the session cookie and
-// returns to the login page. (POST is CSRF-protected; GET is permitted as a
-// convenience link.)
+// renderLogin renders the login page with the data the shared shell needs.
+// message is empty on a plain GET and carries the generic error on a failed
+// POST; next is the same-origin redirect target. It is the single place the
+// login.html contract (Title/HTMX/User/CSRF/Next/message) is defined.
+func (h *handlers) renderLogin(c *gin.Context, status int, next, message string) {
+	markVary(c)
+	c.HTML(status, "login.html", gin.H{
+		"Title":   "Sign in — To Do",
+		"HTMX":    false,
+		"User":    toUserView(domain.User{}),
+		"CSRF":    ensureCSRFToken(c),
+		"Next":    sanitizeNext(next),
+		"message": message,
+	})
+}
+
+// logout handles POST /app/logout: verifies CSRF, clears the session cookie,
+// and returns to the login page. Logout is POST-only so it cannot be
+// triggered by a link, a prefetch, or a cross-site GET.
 func (h *handlers) logout(c *gin.Context) {
-	if c.Request.Method == http.MethodPost && !verifyCSRF(c) {
+	if !verifyCSRF(c) {
 		return
 	}
 	c.SetCookie(sessionCookieName, "", -1, "/", "", secureCookie(c), true)
@@ -132,56 +137,47 @@ func scopeFilter(c *gin.Context, f repository.TaskFilter) repository.TaskFilter 
 	return f
 }
 
-// pageData gathers the stats needed by both the list and stats views.
-func (h *handlers) pageData(c *gin.Context) (application.TaskStats, error) {
-	return h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
-}
-
 // ---- index (full page shell) ----
 
 // index handles GET /app/: the full page shell combining the task list, the
 // filter bar, and the stats strip.
 func (h *handlers) index(c *gin.Context) {
-	tasks, total, err := h.listAndTotal(c)
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-	filter, err := filterFromQuery(c)
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
+	tasks, stats, filter, err := h.listAndTotal(c)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 	markVary(c)
 	c.HTML(http.StatusOK, "index.html", gin.H{
-		"List":  toListPage(tasks, filter, len(tasks), total),
-		"Stats": toStatsView(stats, filter, total > 0),
-		"User":  toUserView(currentUser(c)),
-		"CSRF":  ensureCSRFToken(c),
+		"Title":          "To Do",
+		"HTMX":           true,
+		"NavActionLabel": "+ New Task",
+		"NavActionModal": "modal-create",
+		"List":           toListPage(tasks, filter, len(tasks), stats.Total),
+		"Stats":          toStatsView(stats, filter, stats.Total > 0),
+		"User":           toUserView(currentUser(c)),
+		"CSRF":           ensureCSRFToken(c),
 	})
 }
 
-// listAndTotal returns the page of tasks plus the repository-wide total.
-func (h *handlers) listAndTotal(c *gin.Context) ([]domain.Task, int, error) {
+// listAndTotal returns the page of tasks, the scoped stats, and the parsed
+// filter used for the query. It is the single place that parses the query
+// string, so callers never swallow a filterFromQuery error.
+func (h *handlers) listAndTotal(c *gin.Context) ([]domain.Task, application.TaskStats, repository.TaskFilter, error) {
 	filter, err := filterFromQuery(c)
 	if err != nil {
-		return nil, 0, err
+		return nil, application.TaskStats{}, repository.TaskFilter{}, err
 	}
 	filter = scopeFilter(c, filter)
 	tasks, err := h.svc.ListTasks(c.Request.Context(), filter)
 	if err != nil {
-		return nil, 0, err
+		return nil, application.TaskStats{}, repository.TaskFilter{}, err
 	}
-	total, err := h.svc.Stats(c.Request.Context(), filter)
+	stats, err := h.svc.Stats(c.Request.Context(), filter)
 	if err != nil {
-		return nil, 0, err
+		return nil, application.TaskStats{}, repository.TaskFilter{}, err
 	}
-	return tasks, total.Total, nil
+	return tasks, stats, filter, nil
 }
 
 // ---- FR-1: list / filter / pagination (fragment) ----
@@ -189,15 +185,14 @@ func (h *handlers) listAndTotal(c *gin.Context) ([]domain.Task, int, error) {
 // list handles GET /app/tasks: the task list fragment re-rendered after
 // filtering, searching, or paging.
 func (h *handlers) list(c *gin.Context) {
-	tasks, total, err := h.listAndTotal(c)
+	tasks, stats, filter, err := h.listAndTotal(c)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	filter, _ := filterFromQuery(c)
 	markVary(c)
 	c.HTML(http.StatusOK, "partials/task_list.html", gin.H{
-		"List": toListPage(tasks, filter, len(tasks), total),
+		"List": toListPage(tasks, filter, len(tasks), stats.Total),
 	})
 }
 
@@ -207,7 +202,11 @@ func (h *handlers) list(c *gin.Context) {
 // counters and the "Done" percentage meter, scoped to the caller's role
 // (regular users see only their own counts).
 func (h *handlers) stats(c *gin.Context) {
-	filter, _ := filterFromQuery(c)
+	filter, err := filterFromQuery(c)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
 	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, filter))
 	if err != nil {
 		writeError(c, err)
@@ -224,7 +223,11 @@ func (h *handlers) stats(c *gin.Context) {
 // create handles POST /app/tasks: it reads the form fields, creates the
 // task, and answers with the multi-region mutation response.
 func (h *handlers) create(c *gin.Context) {
-	deadline := optionalDeadline(c.PostForm("deadline"))
+	deadline, err := optionalDeadline(c.PostForm("deadline"))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
 	priority, err := postPriority(c.PostForm("priority"))
 	if err != nil {
 		writeError(c, err)
@@ -392,27 +395,28 @@ func (h *handlers) empty(c *gin.Context) {
 // writeMutation renders the uniform multi-region response: the list, the
 // stats, and a toast, distributed via <hx-partial> elements. For non-HX
 // browsers, fall back to a PRG redirect to the canonical list URL.
+//
+// The whole list + stats are re-rendered deliberately: a mutation can change
+// row ordering (priority), list membership (status/search/page filters), and
+// the per-status counters, so a targeted single-row or OOB swap would leave
+// the UI inconsistent. The <hx-partial> regions keep the payload to the
+// regions that actually need updating while the server stays the source of
+// truth.
 func (h *handlers) writeMutation(c *gin.Context, _ domain.Task, toast string) {
-	tasks, total, err := h.listAndTotal(c)
+	tasks, stats, filter, err := h.listAndTotal(c)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	stats, err := h.svc.Stats(c.Request.Context(), scopeFilter(c, repository.DefaultTaskFilter()))
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-	filter, _ := filterFromQuery(c)
 
 	markVary(c)
 	if !isHX(c) {
-		c.Redirect(http.StatusSeeOther, "/app/?status="+c.Query("status")+"&search="+c.Query("search"))
+		c.Redirect(http.StatusSeeOther, listURL(c))
 		return
 	}
 	c.HTML(http.StatusOK, "partials/mutation.html", gin.H{
-		"List":  toListPage(tasks, filter, len(tasks), total),
-		"Stats": toStatsView(stats, filter, total > 0),
+		"List":  toListPage(tasks, filter, len(tasks), stats.Total),
+		"Stats": toStatsView(stats, filter, stats.Total > 0),
 		"Toast": toast,
 	})
 }
@@ -425,17 +429,35 @@ func callerOf(c *gin.Context) application.Caller {
 	return application.CallerOf(currentUser(c))
 }
 
-// optionalDeadline parses the create-form deadline, returning nil for empty
-// or invalid input (the domain treats an absent deadline as none).
-func optionalDeadline(s string) *time.Time {
+// optionalDeadline parses the create-form deadline. An empty value means
+// "no deadline" (nil); a non-empty invalid value is a 400, matching the
+// update path.
+func optionalDeadline(s string) (*time.Time, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	t, err := httpconv.ParseDeadline(s)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return &t
+	return &t, nil
+}
+
+// listURL builds the canonical /app/ URL for a non-HTMX PRG redirect,
+// carrying the active status/search filters as properly encoded query
+// parameters.
+func listURL(c *gin.Context) string {
+	q := url.Values{}
+	if s := c.Query("status"); s != "" {
+		q.Set("status", s)
+	}
+	if s := c.Query("search"); s != "" {
+		q.Set("search", s)
+	}
+	if len(q) == 0 {
+		return "/app/"
+	}
+	return "/app/?" + q.Encode()
 }
 
 // postPriority parses the priority from a create form; empty defaults to 0.
