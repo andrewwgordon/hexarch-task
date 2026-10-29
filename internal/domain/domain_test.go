@@ -110,3 +110,43 @@ func TestTaskOwnerRoundTrip(t *testing.T) {
 		t.Errorf("hydrated owner %q != created owner %q", h, task.UserID())
 	}
 }
+
+func TestReopenCompletedTask(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	task, err := domain.NewTask("id-reopen", "u-1", "fix bug", "d", 3, nil, now)
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	inProgress, err := task.WithStatus(domain.StatusInProgress, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done, err := inProgress.WithStatus(domain.StatusDone, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	reopened, err := done.WithStatus(domain.StatusInProgress, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("done->in_progress should be allowed: %v", err)
+	}
+	if reopened.Status() != domain.StatusInProgress {
+		t.Fatalf("reopened status = %s, want in_progress", reopened.Status())
+	}
+	if !reopened.UpdatedAt().Equal(now.Add(3 * time.Minute)) {
+		t.Errorf("reopened updatedAt = %v, want %v", reopened.UpdatedAt(), now.Add(3*time.Minute))
+	}
+	if reopened.Priority() != 3 || reopened.Title() != "fix bug" {
+		t.Error("reopen should preserve other task fields")
+	}
+
+	if _, err := done.WithStatus(domain.StatusTodo, now.Add(3*time.Minute)); err == nil {
+		t.Fatal("done->todo must remain illegal")
+	}
+	archived, err := done.WithStatus(domain.StatusArchived, now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	if _, err := archived.WithStatus(domain.StatusInProgress, now.Add(5*time.Minute)); err == nil {
+		t.Fatal("archived tasks must remain terminal")
+	}
+}

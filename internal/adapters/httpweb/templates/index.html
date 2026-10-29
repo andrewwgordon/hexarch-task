@@ -46,6 +46,47 @@
           <option value="archived" {{ if eq .List.StatusFilter "archived" }}selected{{ end }}>Archived</option>
         </select>
 
+        <select name="due" class="select select-sm"
+                hx-get="/app/tasks"
+                hx-trigger="change"
+                hx-target="#task-list"
+                hx-swap="innerHTML"
+                hx-include="#filter-form"
+                hx-push-url="true"
+                hx-indicator="#list-loading">
+          <option value="" {{ if eq .List.DueFilter "" }}selected{{ end }}>Any due date</option>
+          <option value="overdue" {{ if eq .List.DueFilter "overdue" }}selected{{ end }}>Overdue</option>
+          <option value="today" {{ if eq .List.DueFilter "today" }}selected{{ end }}>Due today</option>
+          <option value="soon" {{ if eq .List.DueFilter "soon" }}selected{{ end }}>Due soon</option>
+        </select>
+
+        <select name="sort" class="select select-sm"
+                hx-get="/app/tasks"
+                hx-trigger="change"
+                hx-target="#task-list"
+                hx-swap="innerHTML"
+                hx-include="#filter-form"
+                hx-push-url="true"
+                hx-indicator="#list-loading">
+          <option value="priority" {{ if eq .List.Sort "priority" }}selected{{ end }}>Priority</option>
+          <option value="created" {{ if eq .List.Sort "created" }}selected{{ end }}>Created</option>
+          <option value="updated" {{ if eq .List.Sort "updated" }}selected{{ end }}>Updated</option>
+          <option value="deadline" {{ if eq .List.Sort "deadline" }}selected{{ end }}>Deadline</option>
+          <option value="title" {{ if eq .List.Sort "title" }}selected{{ end }}>Title</option>
+        </select>
+
+        <select name="order" class="select select-sm"
+                hx-get="/app/tasks"
+                hx-trigger="change"
+                hx-target="#task-list"
+                hx-swap="innerHTML"
+                hx-include="#filter-form"
+                hx-push-url="true"
+                hx-indicator="#list-loading">
+          <option value="desc" {{ if eq .List.Order "desc" }}selected{{ end }}>Descending</option>
+          <option value="asc" {{ if eq .List.Order "asc" }}selected{{ end }}>Ascending</option>
+        </select>
+
         <a href="/app/" class="btn btn-sm btn-ghost btn-circle" aria-label="Clear filters" title="Clear filters">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4">
             <path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm.75 7.25 2.13-2.13a.75.75 0 1 0-1.06-1.06L8 7.94 6.13 6.13a.75.75 0 0 0-1.06 1.06l1.81 1.81-1.81 1.81a.75.75 0 1 0 1.06 1.06L8 9.06l1.81 1.81a.75.75 0 1 0 1.06-1.06L8.75 8.25Z" clip-rule="evenodd" />

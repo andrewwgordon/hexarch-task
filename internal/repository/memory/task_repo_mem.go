@@ -86,38 +86,17 @@ func (m *TaskRepositoryMem) ByID(_ context.Context, id domain.TaskID) (domain.Ta
 	return t, nil
 }
 
-// List returns the tasks matching the filter, ordered by priority
-// descending, then created_at descending, with paging applied. Search is
-// case-insensitive substring matching on title and description. A non-nil
-// f.UserID scopes the list to that owner's tasks; nil lists all users' tasks.
+// List returns the tasks matching the filter, using the effective sort/order
+// and paging. Search is case-insensitive substring matching on title and
+// description. A non-nil f.UserID scopes the list to that owner's tasks.
 func (m *TaskRepositoryMem) List(_ context.Context, f repository.TaskFilter) ([]domain.Task, error) {
 	var out []domain.Task
 	for _, t := range m.store {
-		if f.UserID != nil && t.UserID() != *f.UserID {
-			continue
+		if m.matchesFilter(t, f) {
+			out = append(out, t)
 		}
-		if f.Status != nil && t.Status() != *f.Status {
-			continue
-		}
-		if f.Search != "" {
-			needle := strings.ToLower(f.Search)
-			if !strings.Contains(strings.ToLower(t.Title()), needle) &&
-				!strings.Contains(strings.ToLower(t.Description()), needle) {
-				continue
-			}
-		}
-		out = append(out, t)
 	}
-
-	// Same ordering contract as the SQLite adapter:
-	// priority desc, then created_at desc.
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.Priority() != b.Priority() {
-			return a.Priority() > b.Priority()
-		}
-		return a.CreatedAt().Compare(b.CreatedAt()) > 0
-	})
+	m.sortTasks(out, f)
 
 	offset := f.Offset
 	if offset < 0 {
@@ -132,15 +111,12 @@ func (m *TaskRepositoryMem) List(_ context.Context, f repository.TaskFilter) ([]
 	return out[start:end], nil
 }
 
-// Count returns the total number of stored tasks, honoring the filter's
-// UserID scope (nil = all users, admin scope).
+// Count returns the number of stored tasks matching every filter field except
+// paging and sorting.
 func (m *TaskRepositoryMem) Count(_ context.Context, f repository.TaskFilter) (int, error) {
-	if f.UserID == nil {
-		return len(m.store), nil
-	}
 	n := 0
 	for _, t := range m.store {
-		if t.UserID() == *f.UserID {
+		if m.matchesFilter(t, f) {
 			n++
 		}
 	}
@@ -148,18 +124,99 @@ func (m *TaskRepositoryMem) Count(_ context.Context, f repository.TaskFilter) (i
 }
 
 // CountByStatus returns the number of stored tasks in the given status,
-// honoring the filter's UserID scope (nil = all users, admin scope).
-func (m *TaskRepositoryMem) CountByStatus(_ context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
-	n := 0
-	for _, t := range m.store {
-		if f.UserID != nil && t.UserID() != *f.UserID {
-			continue
+// honoring the same filters as Count. The status argument takes precedence.
+func (m *TaskRepositoryMem) CountByStatus(ctx context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
+	f.Status = &status
+	f.Statuses = nil
+	return m.Count(ctx, f)
+}
+
+// matchesFilter is the single in-memory predicate shared by List and Count.
+func (m *TaskRepositoryMem) matchesFilter(t domain.Task, f repository.TaskFilter) bool {
+	if f.UserID != nil && t.UserID() != *f.UserID {
+		return false
+	}
+	if f.Status != nil {
+		if t.Status() != *f.Status {
+			return false
 		}
-		if t.Status() == status {
-			n++
+	} else if len(f.Statuses) > 0 {
+		matched := false
+		for _, s := range f.Statuses {
+			if t.Status() == s {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	return n, nil
+	if f.Search != "" {
+		needle := strings.ToLower(f.Search)
+		if !strings.Contains(strings.ToLower(t.Title()), needle) &&
+			!strings.Contains(strings.ToLower(t.Description()), needle) {
+			return false
+		}
+	}
+	if f.DeadlineFrom != nil || f.DeadlineTo != nil {
+		d := t.Deadline()
+		if d == nil {
+			return false
+		}
+		if f.DeadlineFrom != nil && d.Before(*f.DeadlineFrom) {
+			return false
+		}
+		if f.DeadlineTo != nil && !d.Before(*f.DeadlineTo) {
+			return false
+		}
+	}
+	return true
+}
+
+// sortTasks applies the same ordering contract as the SQL and MongoDB
+// backends: deterministic tie-breakers, case-insensitive titles, and missing
+// deadlines last.
+func (m *TaskRepositoryMem) sortTasks(tasks []domain.Task, f repository.TaskFilter) {
+	sortField, order := f.EffectiveSort()
+	asc := order == repository.SortAsc
+	sort.SliceStable(tasks, func(i, j int) bool {
+		a, b := tasks[i], tasks[j]
+		var cmp int
+		switch sortField {
+		case repository.SortCreated:
+			cmp = a.CreatedAt().Compare(b.CreatedAt())
+		case repository.SortUpdated:
+			cmp = a.UpdatedAt().Compare(b.UpdatedAt())
+		case repository.SortDeadline:
+			ad, bd := a.Deadline(), b.Deadline()
+			switch {
+			case ad == nil && bd == nil:
+				cmp = 0
+			case ad == nil:
+				return false // missing deadlines always last
+			case bd == nil:
+				return true
+			default:
+				cmp = ad.Compare(*bd)
+			}
+		case repository.SortTitle:
+			cmp = strings.Compare(strings.ToLower(a.Title()), strings.ToLower(b.Title()))
+		default: // priority
+			cmp = a.Priority() - b.Priority()
+		}
+		if cmp != 0 {
+			if asc {
+				return cmp < 0
+			}
+			return cmp > 0
+		}
+		// Tie-breakers: created_at desc, then id asc.
+		if c := a.CreatedAt().Compare(b.CreatedAt()); c != 0 {
+			return c > 0
+		}
+		return a.ID() < b.ID()
+	})
 }
 
 // Update replaces the stored task, returning domain.NotFound when the ID

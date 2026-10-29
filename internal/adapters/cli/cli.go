@@ -91,6 +91,8 @@ func (c *Cli) Run(ctx context.Context, args []string) error {
 		return c.changeStatus(ctx, user, rest, domain.StatusInProgress)
 	case "done":
 		return c.changeStatus(ctx, user, rest, domain.StatusDone)
+	case "reopen":
+		return c.reopen(ctx, user, rest)
 	case "priority":
 		return c.priority(ctx, user, rest)
 	case "deadline":
@@ -152,12 +154,15 @@ func (c *Cli) help() {
 	fmt.Println("  Auth is required for every subcommand except help:")
 	fmt.Println("    --email E --password P   (or HEXARCH_EMAIL / HEXARCH_PASSWORD)")
 	fmt.Println("  create    --title T [--desc D] [--priority N] [--deadline 2026-08-30]")
-	fmt.Println("  list      [--status todo|in_progress|done|archived] [--search q] [--limit n] [--offset n]")
+	fmt.Println("  list      [--status todo|in_progress|done|archived] [--search q]")
+	fmt.Println("            [--due overdue|today|soon] [--sort priority|created|updated|deadline|title]")
+	fmt.Println("            [--order asc|desc] [--limit n] [--offset n]")
 	fmt.Println("  get       <id>")
 	fmt.Println("  rename    <id> \"new title\"")
 	fmt.Println("  priority  <id> <n>")
 	fmt.Println("  start     <id>      (mark in_progress)")
 	fmt.Println("  done      <id>      (mark done)")
+	fmt.Println("  reopen    <id>      (done -> in_progress)")
 	fmt.Println("  deadline  <id> YYYY-MM-DD|done")
 	fmt.Println("  remove    <id>")
 	fmt.Println("  stats")
@@ -226,6 +231,27 @@ func (c *Cli) list(ctx context.Context, user domain.User, args []string) error {
 	}
 	if hasOpt(opts.options, "search") {
 		filter.Search = opts.options["search"]
+	}
+	if hasOpt(opts.options, "due") {
+		due, derr := parseDue(opts.options["due"])
+		if derr != nil {
+			return derr
+		}
+		filter.Due = &due
+	}
+	if hasOpt(opts.options, "sort") {
+		sortField, serr := parseSort(opts.options["sort"])
+		if serr != nil {
+			return serr
+		}
+		filter.Sort = sortField
+	}
+	if hasOpt(opts.options, "order") {
+		order, oerr := parseSortOrder(opts.options["order"])
+		if oerr != nil {
+			return oerr
+		}
+		filter.Order = order
 	}
 	if n, perr := parseIntOpt(opts.options, "limit", 100); perr != nil {
 		return perr
@@ -299,6 +325,20 @@ func (c *Cli) changeStatus(ctx context.Context, user domain.User, args []string,
 		return domain.Invalid("usage: start|done <id>")
 	}
 	t, err := c.Svc.ChangeStatus(ctx, domain.TaskID(args[0]), status, application.CallerOf(user))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s is now %s\n", t.ID(), t.Status())
+	return nil
+}
+
+// reopen handles the `reopen` subcommand: it moves a completed task back to
+// in_progress. Caller ownership is enforced by the service (FR-U4).
+func (c *Cli) reopen(ctx context.Context, user domain.User, args []string) error {
+	if len(args) != 1 {
+		return domain.Invalid("usage: reopen <id>")
+	}
+	t, err := c.Svc.ChangeStatus(ctx, domain.TaskID(args[0]), domain.StatusInProgress, application.CallerOf(user))
 	if err != nil {
 		return err
 	}
@@ -380,7 +420,40 @@ func (c *Cli) stats(ctx context.Context, user domain.User, _ []string) error {
 	fmt.Printf("in progress: %d\n", s.InProgress)
 	fmt.Printf("done:        %d\n", s.Done)
 	fmt.Printf("archived:    %d\n", s.Archived)
+	fmt.Printf("overdue:     %d\n", s.Overdue)
+	fmt.Printf("due today:   %d\n", s.DueToday)
+	fmt.Printf("due soon:    %d\n", s.DueSoon)
 	return nil
+}
+
+// parseDue maps a CLI due token onto a repository.DueBucket.
+func parseDue(s string) (repository.DueBucket, error) {
+	switch repository.DueBucket(s) {
+	case repository.DueOverdue, repository.DueToday, repository.DueSoon:
+		return repository.DueBucket(s), nil
+	default:
+		return "", domain.Invalid("invalid due '" + s + "' (want overdue|today|soon)")
+	}
+}
+
+// parseSort maps a CLI sort token onto a repository.SortField.
+func parseSort(s string) (repository.SortField, error) {
+	switch repository.SortField(s) {
+	case repository.SortPriority, repository.SortCreated, repository.SortUpdated, repository.SortDeadline, repository.SortTitle:
+		return repository.SortField(s), nil
+	default:
+		return "", domain.Invalid("invalid sort '" + s + "' (want priority|created|updated|deadline|title)")
+	}
+}
+
+// parseSortOrder maps a CLI order token onto a repository.SortOrder.
+func parseSortOrder(s string) (repository.SortOrder, error) {
+	switch repository.SortOrder(s) {
+	case repository.SortAsc, repository.SortDesc:
+		return repository.SortOrder(s), nil
+	default:
+		return "", domain.Invalid("invalid order '" + s + "' (want asc|desc)")
+	}
 }
 
 // parseStatus maps a CLI status token onto a domain.Status.

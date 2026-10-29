@@ -43,6 +43,8 @@ type taskView struct {
 	Priority      int
 	PriorityLabel string
 	DeadlineStr   string
+	DeadlineLabel string
+	DeadlineClass string
 	CreatedAt     string
 	UpdatedAt     string
 	CanEdit       bool
@@ -61,6 +63,9 @@ type listPage struct {
 	PrevOffset   int
 	NextOffset   int
 	StatusFilter string
+	DueFilter    string
+	Sort         string
+	Order        string
 	Search       string
 	PageCount    int
 	ShowEmpty    bool // no tasks at all (empty state #1)
@@ -74,8 +79,12 @@ type statsView struct {
 	InProgress   int
 	Done         int
 	Archived     int
+	Overdue      int
+	DueToday     int
+	DueSoon      int
 	PercentDone  int
 	ActiveStatus string // "" means no status filter active
+	DueFilter    string // "" means no due filter active
 	Search       string
 	// HasTasks distinguishes "no tasks at all" from "filters match nothing".
 	HasTasks bool
@@ -105,6 +114,7 @@ var transitionTable = map[domain.Status][]transitionView{
 	},
 	domain.StatusDone: {
 		{"Archive", string(domain.StatusArchived), "btn btn-neutral btn-sm btn-outline"},
+		{"Reopen", string(domain.StatusInProgress), "btn btn-info btn-sm btn-outline"},
 	},
 	domain.StatusArchived: {},
 }
@@ -131,6 +141,26 @@ func toTaskView(t domain.Task) taskView {
 	}
 	if d := t.Deadline(); d != nil {
 		v.DeadlineStr = d.Format(time.DateOnly)
+		v.DeadlineLabel = v.DeadlineStr
+		v.DeadlineClass = "badge badge-outline badge-sm"
+		// Deadline emphasis is only meaningful while the task is active.
+		if t.Status() == domain.StatusTodo || t.Status() == domain.StatusInProgress {
+			y, m, day := time.Now().Date()
+			today := time.Date(y, m, day, 0, 0, 0, 0, time.UTC)
+			tomorrow := today.AddDate(0, 0, 1)
+			soonEnd := today.AddDate(0, 0, 8)
+			switch {
+			case d.Before(today):
+				v.DeadlineLabel = "Overdue"
+				v.DeadlineClass = "badge badge-error badge-sm"
+			case d.Before(tomorrow):
+				v.DeadlineLabel = "Today"
+				v.DeadlineClass = "badge badge-warning badge-sm"
+			case d.Before(soonEnd):
+				v.DeadlineLabel = "Soon"
+				v.DeadlineClass = "badge badge-info badge-sm"
+			}
+		}
 	}
 	return v
 }
@@ -167,6 +197,12 @@ func toListPage(tasks []domain.Task, filter repository.TaskFilter, pageCount, to
 	if filter.Status != nil {
 		p.StatusFilter = filter.Status.String()
 	}
+	if filter.Due != nil {
+		p.DueFilter = string(*filter.Due)
+	}
+	sort, order := filter.EffectiveSort()
+	p.Sort = string(sort)
+	p.Order = string(order)
 	p.Search = filter.Search
 	return p
 }
@@ -184,12 +220,18 @@ func toStatsView(s application.TaskStats, filter repository.TaskFilter, hasTasks
 		InProgress:  s.InProgress,
 		Done:        s.Done,
 		Archived:    s.Archived,
+		Overdue:     s.Overdue,
+		DueToday:    s.DueToday,
+		DueSoon:     s.DueSoon,
 		PercentDone: percent,
 		Search:      filter.Search,
 		HasTasks:    hasTasks,
 	}
 	if filter.Status != nil {
 		v.ActiveStatus = filter.Status.String()
+	}
+	if filter.Due != nil {
+		v.DueFilter = string(*filter.Due)
 	}
 	return v
 }

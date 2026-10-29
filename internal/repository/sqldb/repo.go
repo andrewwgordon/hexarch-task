@@ -78,30 +78,11 @@ func (r *TaskRepositorySQL) ByID(ctx context.Context, id domain.TaskID) (domain.
 	return mapTask(rows)
 }
 
-// List returns the tasks matching the filter, ordered by priority
-// descending, then created_at descending, with paging applied.
+// List returns the tasks matching the filter, using the effective sort/order
+// and paging. With no explicit sort it preserves priority desc, created_at
+// desc.
 func (r *TaskRepositorySQL) List(ctx context.Context, f repository.TaskFilter) ([]domain.Task, error) {
-	var clauses []string
-	var args []any
-	if f.UserID != nil {
-		clauses = append(clauses, "user_id = ?")
-		args = append(args, f.UserID.String())
-	}
-	if f.Status != nil {
-		clauses = append(clauses, "status = ?")
-		args = append(args, f.Status.String())
-	}
-	if f.Search != "" {
-		clauses = append(clauses,
-			"("+r.d.CaseInsensitiveMatch("title", "?")+" OR "+
-				r.d.CaseInsensitiveMatch("description", "?")+")")
-		pattern := "%" + strings.ToLower(f.Search) + "%"
-		args = append(args, pattern, pattern)
-	}
-	var where string
-	if len(clauses) > 0 {
-		where = " WHERE " + strings.Join(clauses, " AND ")
-	}
+	where, args := r.taskWhere(f)
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100
@@ -112,7 +93,7 @@ func (r *TaskRepositorySQL) List(ctx context.Context, f repository.TaskFilter) (
 	}
 
 	query := `SELECT ` + taskColumns + ` FROM tasks` + where +
-		` ORDER BY priority DESC, created_at DESC ` + r.d.Pagination(limit, offset)
+		` ORDER BY ` + r.orderClause(f) + ` ` + r.d.Pagination(limit, offset)
 	query = r.d.Rebind(query)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -135,25 +116,85 @@ func (r *TaskRepositorySQL) List(ctx context.Context, f repository.TaskFilter) (
 	return out, nil
 }
 
-// Count returns the total number of tasks, honoring the filter's UserID
-// scope (nil = all users, admin scope).
+// Count returns the number of tasks matching every filter field except paging
+// and sorting. UserID nil means "all users" (admin scope).
 func (r *TaskRepositorySQL) Count(ctx context.Context, f repository.TaskFilter) (int, error) {
-	if f.UserID != nil {
-		return r.countWhere(ctx, " WHERE user_id = ?", f.UserID.String())
-	}
-	return r.countWhere(ctx, "")
+	where, args := r.taskWhere(f)
+	return r.countWhere(ctx, where, args...)
 }
 
-// CountByStatus returns the number of tasks in the given status, honoring
-// the filter's UserID scope (nil = all users, admin scope).
+// CountByStatus returns the number of tasks in the given status, honoring the
+// same filter fields as Count. The status argument takes precedence over any
+// status/statuses already present in the filter.
 func (r *TaskRepositorySQL) CountByStatus(ctx context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
-	clauses := []string{"status = ?"}
-	args := []any{status.String()}
+	f.Status = &status
+	f.Statuses = nil
+	where, args := r.taskWhere(f)
+	return r.countWhere(ctx, where, args...)
+}
+
+// taskWhere builds the shared WHERE clause for List/Count/CountByStatus.
+// Status takes precedence over Statuses. Deadline bounds exclude the
+// no-deadline sentinel (deadline = 0).
+func (r *TaskRepositorySQL) taskWhere(f repository.TaskFilter) (string, []any) {
+	var clauses []string
+	var args []any
 	if f.UserID != nil {
-		clauses = append([]string{"user_id = ?"}, clauses...)
-		args = append([]any{f.UserID.String()}, args...)
+		clauses = append(clauses, "user_id = ?")
+		args = append(args, f.UserID.String())
 	}
-	return r.countWhere(ctx, " WHERE "+strings.Join(clauses, " AND "), args...)
+	if f.Status != nil {
+		clauses = append(clauses, "status = ?")
+		args = append(args, f.Status.String())
+	} else if len(f.Statuses) > 0 {
+		placeholders := make([]string, len(f.Statuses))
+		for i, s := range f.Statuses {
+			placeholders[i] = "?"
+			args = append(args, s.String())
+		}
+		clauses = append(clauses, "status IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	if f.Search != "" {
+		clauses = append(clauses,
+			"("+r.d.CaseInsensitiveMatch("title", "?")+" OR "+
+				r.d.CaseInsensitiveMatch("description", "?")+")")
+		pattern := "%" + strings.ToLower(f.Search) + "%"
+		args = append(args, pattern, pattern)
+	}
+	if f.DeadlineFrom != nil {
+		clauses = append(clauses, "deadline > 0 AND deadline >= ?")
+		args = append(args, f.DeadlineFrom.Unix())
+	}
+	if f.DeadlineTo != nil {
+		clauses = append(clauses, "deadline > 0 AND deadline < ?")
+		args = append(args, f.DeadlineTo.Unix())
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// orderClause is the whitelisted, portable ORDER BY builder. Deadline sorts
+// always place missing deadlines last; title sorting is case-insensitive.
+func (r *TaskRepositorySQL) orderClause(f repository.TaskFilter) string {
+	sort, order := f.EffectiveSort()
+	dir := "DESC"
+	if order == repository.SortAsc {
+		dir = "ASC"
+	}
+	switch sort {
+	case repository.SortCreated:
+		return "created_at " + dir + ", id ASC"
+	case repository.SortUpdated:
+		return "updated_at " + dir + ", id ASC"
+	case repository.SortDeadline:
+		return "CASE WHEN deadline = 0 THEN 1 ELSE 0 END ASC, deadline " + dir + ", created_at DESC, id ASC"
+	case repository.SortTitle:
+		return "lower(title) " + dir + ", created_at DESC, id ASC"
+	default:
+		return "priority " + dir + ", created_at DESC, id ASC"
+	}
 }
 
 // Update persists all mutable fields of an existing task; returning

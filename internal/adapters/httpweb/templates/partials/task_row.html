@@ -4,7 +4,7 @@
   <div class="flex flex-col gap-1 text-sm">
     <span class="{{ $t.BadgeClass }}">{{ $t.StatusLabel }}</span>
     <span class="badge badge-outline badge-sm">{{ $t.PriorityLabel }}</span>
-    {{ if $t.DeadlineStr }}<span class="text-xs text-base-content/60"><time>{{ $t.DeadlineStr }}</time></span>{{ end }}
+    {{ if $t.DeadlineStr }}<span class="{{ $t.DeadlineClass }}"><time datetime="{{ $t.DeadlineStr }}">{{ $t.DeadlineLabel }}</time></span>{{ end }}
   </div>
 
   <div class="list-col-grow">

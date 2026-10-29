@@ -31,4 +31,22 @@
     <div class="stat-value {{ if eq $s.ActiveStatus "archived" }}text-primary{{ end }}"><a class="link link-hover" href="/app/?status=archived" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"status":"archived"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.Archived }}</a></div>
   </div>
 </div>
+
+<div class="stats stats-vertical sm:stats-horizontal w-full shadow mt-3">
+  <div class="stat">
+    <div class="stat-title">Overdue</div>
+    <div class="stat-value {{ if eq $s.DueFilter "overdue" }}text-error{{ end }}"><a class="link link-hover" href="/app/?due=overdue" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"due":"overdue"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.Overdue }}</a></div>
+    <div class="stat-desc">active tasks past their date</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Due today</div>
+    <div class="stat-value {{ if eq $s.DueFilter "today" }}text-warning{{ end }}"><a class="link link-hover" href="/app/?due=today" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"due":"today"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.DueToday }}</a></div>
+    <div class="stat-desc">active tasks due today</div>
+  </div>
+  <div class="stat">
+    <div class="stat-title">Due soon</div>
+    <div class="stat-value {{ if eq $s.DueFilter "soon" }}text-info{{ end }}"><a class="link link-hover" href="/app/?due=soon" hx-get="/app/tasks" hx-include="#filter-form" hx-vals='{"due":"soon"}' hx-target="#task-list" hx-swap="innerHTML" hx-push-url="true">{{ $s.DueSoon }}</a></div>
+    <div class="stat-desc">active tasks due in the next 7 days</div>
+  </div>
+</div>
 {{ end }}

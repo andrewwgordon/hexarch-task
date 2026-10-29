@@ -148,6 +148,8 @@ func (r *TaskRepositoryMongo) ensureIndexes(ctx context.Context) error {
 	_, err := r.coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "priority", Value: -1}, {Key: "created_at", Value: -1}}},
 		{Keys: bson.D{{Key: "status", Value: 1}}},
+		{Keys: bson.D{{Key: "userid", Value: 1}, {Key: "status", Value: 1}, {Key: "deadline", Value: 1}}},
+		{Keys: bson.D{{Key: "userid", Value: 1}, {Key: "updated_at", Value: -1}}},
 	})
 	return err
 }
@@ -179,22 +181,9 @@ func (r *TaskRepositoryMongo) ByID(ctx context.Context, id domain.TaskID) (domai
 }
 
 // List returns the tasks matching the filter with the same ordering and
-// paging contract as the SQL backends: priority desc, then created_at desc.
+// paging contract as the SQL and memory backends. Aggregation is used so
+// missing deadlines always sort last and title sorting is case-insensitive.
 func (r *TaskRepositoryMongo) List(ctx context.Context, f repository.TaskFilter) ([]domain.Task, error) {
-	filter := bson.M{}
-	if f.UserID != nil {
-		filter["userid"] = f.UserID.String()
-	}
-	if f.Status != nil {
-		filter["status"] = f.Status.String()
-	}
-	if f.Search != "" {
-		re := primitive.Regex{Pattern: regexp.QuoteMeta(f.Search), Options: "i"}
-		filter["$or"] = bson.A{
-			bson.M{"title": re},
-			bson.M{"description": re},
-		}
-	}
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 100
@@ -203,12 +192,19 @@ func (r *TaskRepositoryMongo) List(ctx context.Context, f repository.TaskFilter)
 	if offset < 0 {
 		offset = 0
 	}
-	opts := options.Find().
-		SetSort(bson.D{{Key: "priority", Value: -1}, {Key: "created_at", Value: -1}}).
-		SetSkip(int64(offset)).
-		SetLimit(int64(limit))
 
-	cur, err := r.coll.Find(ctx, filter, opts)
+	cur, err := r.coll.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: taskFilter(f)}},
+		{{Key: "$addFields", Value: bson.M{
+			"_sort_has_deadline": bson.M{"$cond": bson.A{
+				bson.M{"$ne": bson.A{bson.M{"$ifNull": bson.A{"$deadline", nil}}, nil}}, 1, 0,
+			}},
+			"_sort_title": bson.M{"$toLower": "$title"},
+		}}},
+		{{Key: "$sort", Value: taskSort(f)}},
+		{{Key: "$skip", Value: int64(offset)}},
+		{{Key: "$limit", Value: int64(limit)}},
+	})
 	if err != nil {
 		return []domain.Task{}, domain.Storage("list failed: " + err.Error())
 	}
@@ -232,14 +228,10 @@ func (r *TaskRepositoryMongo) List(ctx context.Context, f repository.TaskFilter)
 	return out, nil
 }
 
-// Count returns the total number of documents in the collection, honoring
-// the filter's UserID scope (nil = all users, admin scope).
+// Count returns the number of documents matching every filter field except
+// paging and sorting. UserID nil means "all users" (admin scope).
 func (r *TaskRepositoryMongo) Count(ctx context.Context, f repository.TaskFilter) (int, error) {
-	filter := bson.M{}
-	if f.UserID != nil {
-		filter["userid"] = f.UserID.String()
-	}
-	n, err := r.coll.CountDocuments(ctx, filter)
+	n, err := r.coll.CountDocuments(ctx, taskFilter(f))
 	if err != nil {
 		return 0, domain.Storage("count failed: " + err.Error())
 	}
@@ -247,17 +239,82 @@ func (r *TaskRepositoryMongo) Count(ctx context.Context, f repository.TaskFilter
 }
 
 // CountByStatus returns the number of documents in the given status, honoring
-// the filter's UserID scope (nil = all users, admin scope).
+// the same filters as Count. The status argument takes precedence.
 func (r *TaskRepositoryMongo) CountByStatus(ctx context.Context, status domain.Status, f repository.TaskFilter) (int, error) {
-	filter := bson.M{"status": status.String()}
+	f.Status = &status
+	f.Statuses = nil
+	return r.Count(ctx, f)
+}
+
+// taskFilter builds the shared MongoDB match document for List/Count.
+// Deadline bounds exclude documents without a deadline.
+func taskFilter(f repository.TaskFilter) bson.M {
+	filter := bson.M{}
 	if f.UserID != nil {
 		filter["userid"] = f.UserID.String()
 	}
-	n, err := r.coll.CountDocuments(ctx, filter)
-	if err != nil {
-		return 0, domain.Storage("count failed: " + err.Error())
+	if f.Status != nil {
+		filter["status"] = f.Status.String()
+	} else if len(f.Statuses) > 0 {
+		statuses := make(bson.A, 0, len(f.Statuses))
+		for _, s := range f.Statuses {
+			statuses = append(statuses, s.String())
+		}
+		filter["status"] = bson.M{"$in": statuses}
 	}
-	return int(n), nil
+	if f.Search != "" {
+		re := primitive.Regex{Pattern: regexp.QuoteMeta(f.Search), Options: "i"}
+		filter["$or"] = bson.A{
+			bson.M{"title": re},
+			bson.M{"description": re},
+		}
+	}
+	if f.DeadlineFrom != nil || f.DeadlineTo != nil {
+		rangeDoc := bson.M{"$ne": nil}
+		if f.DeadlineFrom != nil {
+			rangeDoc["$gte"] = *f.DeadlineFrom
+		}
+		if f.DeadlineTo != nil {
+			rangeDoc["$lt"] = *f.DeadlineTo
+		}
+		filter["deadline"] = rangeDoc
+	}
+	return filter
+}
+
+// taskSort mirrors the SQL ORDER BY contract. Missing deadlines sort last in
+// both directions; title sorting is case-insensitive.
+func taskSort(f repository.TaskFilter) bson.D {
+	sortField, order := f.EffectiveSort()
+	dir := -1
+	if order == repository.SortAsc {
+		dir = 1
+	}
+	switch sortField {
+	case repository.SortCreated:
+		return bson.D{{Key: "created_at", Value: dir}, {Key: "_id", Value: 1}}
+	case repository.SortUpdated:
+		return bson.D{{Key: "updated_at", Value: dir}, {Key: "_id", Value: 1}}
+	case repository.SortDeadline:
+		return bson.D{
+			{Key: "_sort_has_deadline", Value: -1},
+			{Key: "deadline", Value: dir},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: 1},
+		}
+	case repository.SortTitle:
+		return bson.D{
+			{Key: "_sort_title", Value: dir},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: 1},
+		}
+	default:
+		return bson.D{
+			{Key: "priority", Value: dir},
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: 1},
+		}
+	}
 }
 
 // Update replaces the document for the task's ID; a non-matching ID yields

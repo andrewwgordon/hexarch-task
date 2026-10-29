@@ -225,14 +225,15 @@ exercise only exported APIs, preventing brittle coupling to internal details:
 ## Features
 
 - **Create** tasks with title, optional description, priority (0–5), and deadline.
-- **List** tasks with filtering by status, full-text search, and paging
-  (ordered by priority desc, then created date desc).
+- **List** tasks with filtering by status, due bucket (`overdue`, `today`,
+  `soon`), full-text search, and paging; sort by priority, created, updated,
+  deadline, or title in either direction.
 - **Inspect** a single task by ID.
 - **Rename**, **re-prioritize**, and **set/clear deadlines**.
 - **Lifecycle** management through a validated state machine:
-  `todo → in_progress → done → archived`.
+  `todo → in_progress → done → archived`, with `done → in_progress` reopen.
 - **Delete** tasks.
-- **Stats** — counts per status.
+- **Stats** — counts per status plus overdue / due-today / due-soon counters.
 - **Multi-user & authentication** (see [Authentication](#authentication) for
   the full architecture):
   - Email + password sign-in; passwords stored **only** as bcrypt hashes.
@@ -348,6 +349,8 @@ hexarch cli create --email admin@email.com --password admin \
 hexarch cli list --email admin@email.com --password admin          # all own tasks
 hexarch cli list --email admin@email.com --password admin --status in_progress
 hexarch cli list --email admin@email.com --password admin --search "login"
+hexarch cli list --email admin@email.com --password admin --due overdue
+hexarch cli list --email admin@email.com --password admin --sort deadline --order asc
 hexarch cli list --email admin@email.com --password admin --limit 20 --offset 40
 
 hexarch cli get <id>
@@ -355,6 +358,7 @@ hexarch cli rename <id> "New title"
 hexarch cli priority <id> 5
 hexarch cli start <id>       # todo -> in_progress
 hexarch cli done  <id>       # in_progress -> done
+hexarch cli reopen <id>      # done -> in_progress
 hexarch cli deadline <id> 2026-10-15
 hexarch cli deadline <id> done      # clear the deadline
 hexarch cli remove <id>
@@ -385,6 +389,9 @@ todo:         0
 in progress:  0
 done:         1
 archived:     0
+overdue:      0
+due today:    0
+due soon:     0
 ```
 
 #### Status lifecycle
@@ -393,11 +400,29 @@ Legal transitions are enforced by the domain:
 
 ```
 todo ────────▶ in_progress ────────▶ done ────────▶ archived
-                     ▲
-                     └── (back to todo is allowed)
+                     ▲                  │
+                     └──────────────────┘
+                        (reopen; back to todo is also allowed)
 ```
 
 Attempting an illegal jump (e.g. `todo → done`) returns a `CONFLICT` error.
+Archived tasks are terminal.
+
+#### Due-date semantics
+
+Deadlines are calendar dates. The due filters use the server-local date,
+normalized to UTC midnight for comparison:
+
+| Bucket | Meaning |
+|---|---|
+| `overdue` | deadline before today |
+| `today` | deadline is today |
+| `soon` | tomorrow through seven days ahead |
+
+Due filters default to active tasks (`todo` and `in_progress`); an explicit
+`status` parameter overrides that default. Tasks without a deadline never match
+a due bucket. The due counters in the stats strip are mutually exclusive and
+always count active tasks.
 
 ---
 
@@ -422,7 +447,7 @@ admins may pass `?user_id=<userid>` (or `?user_id=all`) on list endpoints.
 |--------|------------------|---------------------------------------------------------------------|----------------|
 | POST   | `/api/login`     | Exchange email + password for the user record (incl. apikey)        | `whoami`       |
 | POST   | `/api/tasks`     | Create a task (body: `title`, `description`, `priority`, `deadline`)| `create`       |
-| GET    | `/api/tasks`     | List tasks (`?status=&search=&limit=&offset=&user_id=`)             | `list`         |
+| GET    | `/api/tasks`     | List tasks (`?status=&search=&due=&sort=&order=&limit=&offset=&user_id=`) | `list`         |
 | GET    | `/api/tasks/:id` | Get a task by id                                                    | `get`          |
 | PATCH  | `/api/tasks/:id` | Update `title` / `status` / `priority` / `deadline`                 | `rename`, `priority`, `start`, `done`, `deadline` |
 | DELETE | `/api/tasks/:id` | Delete a task                                                       | `remove`       |
@@ -446,6 +471,10 @@ curl -s 'http://localhost:8080/api/tasks?status=done&limit=10&offset=0'
 
 # full-text search
 curl -s 'http://localhost:8080/api/tasks?search=ship'
+
+# due buckets and sorting
+curl -s 'http://localhost:8080/api/tasks?due=overdue'
+curl -s 'http://localhost:8080/api/tasks?sort=deadline&order=asc'
 
 # get one
 curl -s http://localhost:8080/api/tasks/<id>
@@ -494,7 +523,7 @@ and `deadline` in one request. A `deadline` of `null` clears it.
 
 **List:** `{ "tasks": [ … ], "count": n }`
 
-**Stats:** `{ "total": n, "todo": n, "in_progress": n, "done": n, "archived": n }`
+**Stats:** `{ "total": n, "todo": n, "in_progress": n, "done": n, "archived": n, "overdue": n, "due_today": n, "due_soon": n }`
 
 **Error:**
 ```json
@@ -530,17 +559,18 @@ interacting dynamically via HTMX.
 <img src="assets/web-ui.png" width="800" height="600">
 
 - **Stats dashboard** — live radial-progress “Done” meter plus clickable counters
-  per status that double as filters.
+  per status and due counters (overdue / due today / due soon) that double as
+  filters.
 - **Search & filter** — real-time full-text search with 300 ms debounce,
-  status dropdown filter, and a clear-filters action; all pushed to the URL
-  for shareable links.
-- **Task list** — paginated (20 per page, Prev / Next), sorted by priority then
-  creation date, with two empty states: “No tasks yet” and “No tasks match
-  the current filters.”
+  status and due dropdown filters, sort field/direction controls, and a
+  clear-filters action; all pushed to the URL for shareable links.
+- **Task list** — paginated (20 per page, Prev / Next), with selectable sorting
+  and deadline emphasis, plus two empty states: “No tasks yet” and “No tasks
+  match the current filters.”
 - **Inline status transitions** — each row shows only the legal next actions
   (e.g. **Start** for *todo*, **Complete** / **Back to to do** for
-  *in_progress*, **Archive** for *done*). Illegal transitions are blocked by
-  the domain and surface as inline error alerts.
+  *in_progress*, **Archive** / **Reopen** for *done*). Illegal transitions are
+  blocked by the domain and surface as inline error alerts.
 - **Create task** — modal dialog with title, description, priority (0–5), and
   optional deadline.
 - **Edit task** — server-prefetched modal with current values; supports renaming,
@@ -568,7 +598,7 @@ management routes additionally require the admin role (see
 |--------|------|-------------|
 | GET | `/app/login` | Login page (redirects to `/app/` when already signed in) |
 | POST | `/app/login` | Verify credentials, issue session cookie (CSRF-protected) |
-| GET/POST | `/app/logout` | Clear the session, return to the login page |
+| POST | `/app/logout` | Clear the session, return to the login page (CSRF-protected) |
 | GET | `/app/users` | User Management page (admin only) |
 | POST | `/app/users` | Create a user (admin only) |
 | GET | `/app/users/:id/edit` | Edit-user modal fragment (admin only) |
@@ -576,7 +606,7 @@ management routes additionally require the admin role (see
 | GET | `/app/users/:id/delete` | Delete-confirmation modal fragment (admin only) |
 | DELETE | `/app/users/:id` | Delete a user and their tasks (admin only) |
 | GET | `/app/` | Full page shell (list + stats + filters) |
-| GET | `/app/tasks` | Task list fragment (search, status, paging) |
+| GET | `/app/tasks` | Task list fragment (search, status, due, sort, paging) |
 | POST | `/app/tasks` | Create a task |
 | GET | `/app/tasks/:id/edit` | Edit modal fragment |
 | PATCH | `/app/tasks/:id` | Update title / priority / deadline |

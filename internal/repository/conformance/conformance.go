@@ -339,4 +339,202 @@ func Repository(t *testing.T, newRepo func(t *testing.T) repository.TaskReposito
 		err := repo.Delete(ctx, "x1")
 		assertKind(t, err, domain.KindNotFound)
 	})
+	t.Run("ListStatusesAndPrecedence", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		todo := mustTask(t, "st-todo", "todo", 1, base)
+		inprog, err := mustTask(t, "st-prog", "progress", 1, base.Add(time.Minute)).WithStatus(domain.StatusInProgress, now(base.Add(time.Minute)))
+		if err != nil {
+			t.Fatalf("WithStatus: %v", err)
+		}
+		done, err := mustTask(t, "st-done", "done", 1, base.Add(2*time.Minute)).WithStatus(domain.StatusInProgress, now(base.Add(2*time.Minute)))
+		if err != nil {
+			t.Fatalf("WithStatus: %v", err)
+		}
+		done, err = done.WithStatus(domain.StatusDone, now(base.Add(3*time.Minute)))
+		if err != nil {
+			t.Fatalf("WithStatus: %v", err)
+		}
+		for _, task := range []domain.Task{todo, inprog, done} {
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", task.ID(), err)
+			}
+		}
+		got, err := repo.List(ctx, repository.TaskFilter{Statuses: []domain.Status{domain.StatusTodo, domain.StatusDone}})
+		if err != nil {
+			t.Fatalf("List statuses: %v", err)
+		}
+		requireIDs(t, got, "st-done", "st-todo")
+		// Status takes precedence over Statuses.
+		prog := domain.StatusInProgress
+		got, err = repo.List(ctx, repository.TaskFilter{Status: &prog, Statuses: []domain.Status{domain.StatusTodo}})
+		if err != nil {
+			t.Fatalf("List status precedence: %v", err)
+		}
+		requireIDs(t, got, "st-prog")
+		if n, err := repo.Count(ctx, repository.TaskFilter{Statuses: []domain.Status{domain.StatusTodo, domain.StatusDone}}); err != nil || n != 2 {
+			t.Fatalf("Count statuses = %d, %v; want 2", n, err)
+		}
+	})
+
+	t.Run("ListDueRanges", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		today := base
+		yesterday := today.AddDate(0, 0, -1)
+		tomorrow := today.AddDate(0, 0, 1)
+		soon := today.AddDate(0, 0, 2)
+		later := today.AddDate(0, 0, 10)
+		mk := func(id domain.TaskID, title string, deadline time.Time) domain.Task {
+			task, err := domain.NewTask(id, owner, title, "", 1, &deadline, now(base))
+			if err != nil {
+				t.Fatalf("NewTask(%s): %v", id, err)
+			}
+			return task
+		}
+		for _, task := range []domain.Task{
+			mk("due-yesterday", "yesterday", yesterday),
+			mk("due-today", "today", today),
+			mk("due-soon", "soon", soon),
+			mk("due-later", "later", later),
+			mustTask(t, "due-none", "none", 1, base),
+		} {
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", task.ID(), err)
+			}
+		}
+		tomorrowEnd := tomorrow.AddDate(0, 0, 0)
+		soonEnd := today.AddDate(0, 0, 8)
+		cases := []struct {
+			name string
+			from *time.Time
+			to   *time.Time
+			want []domain.TaskID
+		}{
+			{"overdue", nil, &today, []domain.TaskID{"due-yesterday"}},
+			{"today", &today, &tomorrowEnd, []domain.TaskID{"due-today"}},
+			{"soon", &tomorrow, &soonEnd, []domain.TaskID{"due-soon"}},
+			{"later", &soonEnd, nil, []domain.TaskID{"due-later"}},
+		}
+		for _, tc := range cases {
+			got, err := repo.List(ctx, repository.TaskFilter{DeadlineFrom: tc.from, DeadlineTo: tc.to})
+			if err != nil {
+				t.Fatalf("List %s: %v", tc.name, err)
+			}
+			requireIDs(t, got, tc.want...)
+			n, err := repo.Count(ctx, repository.TaskFilter{DeadlineFrom: tc.from, DeadlineTo: tc.to})
+			if err != nil {
+				t.Fatalf("Count %s: %v", tc.name, err)
+			}
+			if n != len(tc.want) {
+				t.Fatalf("Count %s = %d, want %d", tc.name, n, len(tc.want))
+			}
+		}
+	})
+
+	t.Run("ListSorting", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		created := []domain.Task{
+			mustTask(t, "s-a", "beta", 1, base.Add(time.Minute)),
+			mustTask(t, "s-b", "Alpha", 3, base.Add(2*time.Minute)),
+			mustTask(t, "s-c", "gamma", 2, base.Add(3*time.Minute)),
+		}
+		for _, task := range created {
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", task.ID(), err)
+			}
+		}
+		// Default remains priority desc, created desc.
+		got, err := repo.List(ctx, repository.TaskFilter{})
+		if err != nil {
+			t.Fatalf("List default: %v", err)
+		}
+		requireIDs(t, got, "s-b", "s-c", "s-a")
+
+		tests := []struct {
+			name  string
+			sort  repository.SortField
+			order repository.SortOrder
+			want  []domain.TaskID
+		}{
+			{"priority asc", repository.SortPriority, repository.SortAsc, []domain.TaskID{"s-a", "s-c", "s-b"}},
+			{"created asc", repository.SortCreated, repository.SortAsc, []domain.TaskID{"s-a", "s-b", "s-c"}},
+			{"created desc", repository.SortCreated, repository.SortDesc, []domain.TaskID{"s-c", "s-b", "s-a"}},
+			{"title asc", repository.SortTitle, repository.SortAsc, []domain.TaskID{"s-b", "s-a", "s-c"}},
+			{"title desc", repository.SortTitle, repository.SortDesc, []domain.TaskID{"s-c", "s-a", "s-b"}},
+		}
+		for _, tc := range tests {
+			got, err := repo.List(ctx, repository.TaskFilter{Sort: tc.sort, Order: tc.order})
+			if err != nil {
+				t.Fatalf("List %s: %v", tc.name, err)
+			}
+			requireIDs(t, got, tc.want...)
+		}
+	})
+
+	t.Run("ListDeadlineSortingMissingLast", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		d1 := base.AddDate(0, 0, 1)
+		d2 := base.AddDate(0, 0, 2)
+		withDeadline1, _ := domain.NewTask("deadline-1", owner, "one", "", 1, &d1, now(base))
+		withDeadline2, _ := domain.NewTask("deadline-2", owner, "two", "", 1, &d2, now(base))
+		noDeadline := mustTask(t, "deadline-none", "none", 1, base)
+		for _, task := range []domain.Task{withDeadline1, withDeadline2, noDeadline} {
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", task.ID(), err)
+			}
+		}
+		got, err := repo.List(ctx, repository.TaskFilter{Sort: repository.SortDeadline, Order: repository.SortAsc})
+		if err != nil {
+			t.Fatalf("List deadline asc: %v", err)
+		}
+		requireIDs(t, got, "deadline-1", "deadline-2", "deadline-none")
+		got, err = repo.List(ctx, repository.TaskFilter{Sort: repository.SortDeadline, Order: repository.SortDesc})
+		if err != nil {
+			t.Fatalf("List deadline desc: %v", err)
+		}
+		requireIDs(t, got, "deadline-2", "deadline-1", "deadline-none")
+	})
+
+	t.Run("ListUpdatedSorting", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		tasks := []domain.Task{
+			mustTask(t, "up-a", "a", 1, base.Add(time.Minute)),
+			mustTask(t, "up-b", "b", 1, base.Add(2*time.Minute)),
+			mustTask(t, "up-c", "c", 1, base.Add(3*time.Minute)),
+		}
+		for _, task := range tasks {
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", task.ID(), err)
+			}
+		}
+		// Move up-a to the newest updated time.
+		updated, err := tasks[0].Rename("a-updated", now(base.Add(10*time.Minute)))
+		if err != nil {
+			t.Fatalf("Rename: %v", err)
+		}
+		if err := repo.Update(ctx, updated); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		got, err := repo.List(ctx, repository.TaskFilter{Sort: repository.SortUpdated, Order: repository.SortDesc})
+		if err != nil {
+			t.Fatalf("List updated desc: %v", err)
+		}
+		requireIDs(t, got, "up-a", "up-c", "up-b")
+	})
+
+	t.Run("ListPagingAfterSort", func(t *testing.T) {
+		repo := newRepoWithOwner(t, newRepo)
+		for i, title := range []string{"d", "b", "a", "c"} {
+			id := domain.TaskID(string(rune('a' + i)))
+			task := mustTask(t, id, title, 1, base.Add(time.Duration(i)*time.Minute))
+			if err := repo.Create(ctx, task); err != nil {
+				t.Fatalf("Create %s: %v", id, err)
+			}
+		}
+		got, err := repo.List(ctx, repository.TaskFilter{Sort: repository.SortTitle, Order: repository.SortAsc, Limit: 2, Offset: 1})
+		if err != nil {
+			t.Fatalf("List paged sort: %v", err)
+		}
+		requireIDs(t, got, "b", "d")
+	})
+
 }

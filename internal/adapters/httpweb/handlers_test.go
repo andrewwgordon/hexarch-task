@@ -851,3 +851,97 @@ func TestWebUserCSRFRequired(t *testing.T) {
 		t.Fatalf("missing CSRF status = %d, want 403", w.Code)
 	}
 }
+
+// ---- Release 1: due filters, sorting, reopen, due stats ----
+
+func TestWebDueFiltersSortingAndReopen(t *testing.T) {
+	_, c := newWebSession(t)
+
+	seed := func(title, priority, deadline string) {
+		form := url.Values{"title": {title}, "priority": {priority}, "deadline": {deadline}}
+		w := c.do(t, "POST", "/app/tasks", false, form)
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("seed %q status = %d; body=%s", title, w.Code, w.Body.String())
+		}
+	}
+	seed("Beta", "1", "2026-08-24")
+	seed("alpha", "3", "2026-08-25")
+	seed("Gamma", "2", "2026-08-26")
+	seed("No date", "1", "")
+
+	// Due filter returns the matching task and marks the control selected.
+	w := c.do(t, "GET", "/app/?due=overdue", false, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("due page status = %d; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "Beta") || strings.Contains(body, "Gamma") {
+		t.Errorf("overdue filter returned wrong tasks: %s", body)
+	}
+	if !strings.Contains(body, `<option value="overdue" selected>`) {
+		t.Errorf("overdue control not selected: %s", body)
+	}
+
+	// Title sorting is case-insensitive.
+	w = c.do(t, "GET", "/app/tasks?sort=title&order=asc", true, nil)
+	body = w.Body.String()
+	positions := []int{
+		strings.Index(body, "alpha"),
+		strings.Index(body, "Beta"),
+		strings.Index(body, "Gamma"),
+		strings.Index(body, "No date"),
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] < 0 || positions[i] < 0 || positions[i-1] > positions[i] {
+			t.Fatalf("title sort order wrong: positions=%v", positions)
+		}
+	}
+
+	// Due counters are rendered in the stats fragment.
+	w = c.do(t, "GET", "/app/stats", true, nil)
+	body = w.Body.String()
+	for _, want := range []string{"Overdue", "Due today", "Due soon"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stats fragment missing %q: %s", want, body)
+		}
+	}
+
+	// Complete alpha, then reopen it.
+	advanceStatus(t, c, "id-002", "in_progress")
+	advanceStatus(t, c, "id-002", "done")
+	w = c.do(t, "GET", "/app/tasks", true, nil)
+	if !strings.Contains(w.Body.String(), "Reopen") {
+		t.Fatalf("done row missing Reopen action: %s", w.Body.String())
+	}
+	advanceStatus(t, c, "id-002", "in_progress")
+	w = c.do(t, "GET", "/app/tasks", true, nil)
+	if !strings.Contains(w.Body.String(), `id="task-row-id-002"`) {
+		t.Fatalf("reopened task not in list: %s", w.Body.String())
+	}
+}
+
+func TestWebDeadlineBadgeAndPRGFilters(t *testing.T) {
+	_, c := newWebSession(t)
+	today := time.Now().Format(time.DateOnly)
+	form := url.Values{"title": {"Due now"}, "deadline": {today}}
+	if w := c.do(t, "POST", "/app/tasks", false, form); w.Code != http.StatusSeeOther {
+		t.Fatalf("create status = %d; body=%s", w.Code, w.Body.String())
+	}
+	w := c.do(t, "GET", "/app/tasks", true, nil)
+	if !strings.Contains(w.Body.String(), "badge badge-warning") {
+		t.Errorf("today deadline badge missing: %s", w.Body.String())
+	}
+
+	// Non-HTMX mutation PRG preserves due/sort/order.
+	form = url.Values{"title": {"PRG task"}}
+	w = c.do(t, "POST", "/app/tasks?due=overdue&sort=title&order=asc", false, form)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("mutation status = %d; body=%s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	for _, want := range []string{"due=overdue", "sort=title", "order=asc"} {
+		if !strings.Contains(loc, want) {
+			t.Errorf("PRG location %q missing %q", loc, want)
+		}
+	}
+}

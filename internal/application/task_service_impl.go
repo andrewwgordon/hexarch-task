@@ -91,10 +91,38 @@ func (s *TaskServiceImpl) GetTask(ctx context.Context, id domain.TaskID, caller 
 	return s.loadOwned(ctx, id, caller)
 }
 
-// ListTasks returns the tasks matching the filter, ordered by the
-// repository's contract (priority desc, then created_at desc).
+// ListTasks returns the tasks matching the filter. Due filters are resolved
+// against the injected clock into absolute date bounds, and due queries
+// default to active (todo + in_progress) tasks unless an explicit status was
+// supplied. Sorting uses the repository contract.
 func (s *TaskServiceImpl) ListTasks(ctx context.Context, filter repository.TaskFilter) ([]domain.Task, error) {
-	return s.repo.List(ctx, filter)
+	if err := filter.Validate(); err != nil {
+		return nil, err
+	}
+	resolved, err := s.resolveDueFilter(filter)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.List(ctx, resolved)
+}
+
+// resolveDueFilter turns a semantic Due bucket into DeadlineFrom/DeadlineTo
+// bounds and applies the active-status default. Repositories therefore never
+// depend on the wall clock or timezone.
+func (s *TaskServiceImpl) resolveDueFilter(f repository.TaskFilter) (repository.TaskFilter, error) {
+	if f.Due == nil {
+		return f, nil
+	}
+	from, to, err := dueWindow(s.clock(), *f.Due)
+	if err != nil {
+		return repository.TaskFilter{}, err
+	}
+	f.DeadlineFrom = from
+	f.DeadlineTo = to
+	if f.Status == nil && len(f.Statuses) == 0 {
+		f.Statuses = []domain.Status{domain.StatusTodo, domain.StatusInProgress}
+	}
+	return f, nil
 }
 
 // RenameTask loads the task, applies the domain's rename rule, and persists
@@ -212,27 +240,82 @@ func (s *TaskServiceImpl) loadOwned(ctx context.Context, id domain.TaskID, calle
 // own ID — specs docs/auth.md §3.4). The total is derived independently so
 // a storage error in one counter never corrupts the others.
 func (s *TaskServiceImpl) Stats(ctx context.Context, f repository.TaskFilter) (TaskStats, error) {
-	total, err := s.repo.Count(ctx, f)
+	// The stats strip reports overall counts for the caller's user scope. It
+	// deliberately ignores list-only filters such as status, search, due, and
+	// paging, preserving the existing behavior.
+	base := repository.TaskFilter{UserID: f.UserID}
+	total, err := s.repo.Count(ctx, base)
 	if err != nil {
 		return TaskStats{}, err
 	}
-	todo, err := s.repo.CountByStatus(ctx, domain.StatusTodo, f)
+	todo, err := s.repo.CountByStatus(ctx, domain.StatusTodo, base)
 	if err != nil {
 		return TaskStats{}, err
 	}
-	inProgress, err := s.repo.CountByStatus(ctx, domain.StatusInProgress, f)
+	inProgress, err := s.repo.CountByStatus(ctx, domain.StatusInProgress, base)
 	if err != nil {
 		return TaskStats{}, err
 	}
-	done, err := s.repo.CountByStatus(ctx, domain.StatusDone, f)
+	done, err := s.repo.CountByStatus(ctx, domain.StatusDone, base)
 	if err != nil {
 		return TaskStats{}, err
 	}
-	archived, err := s.repo.CountByStatus(ctx, domain.StatusArchived, f)
+	archived, err := s.repo.CountByStatus(ctx, domain.StatusArchived, base)
 	if err != nil {
 		return TaskStats{}, err
 	}
-	return TaskStats{Total: total, Todo: todo, InProgress: inProgress, Done: done, Archived: archived}, nil
+
+	active := []domain.Status{domain.StatusTodo, domain.StatusInProgress}
+	countDue := func(bucket repository.DueBucket) (int, error) {
+		from, to, derr := dueWindow(s.clock(), bucket)
+		if derr != nil {
+			return 0, derr
+		}
+		dueFilter := repository.TaskFilter{
+			UserID:       base.UserID,
+			Statuses:     active,
+			DeadlineFrom: from,
+			DeadlineTo:   to,
+		}
+		return s.repo.Count(ctx, dueFilter)
+	}
+	overdue, err := countDue(repository.DueOverdue)
+	if err != nil {
+		return TaskStats{}, err
+	}
+	dueToday, err := countDue(repository.DueToday)
+	if err != nil {
+		return TaskStats{}, err
+	}
+	dueSoon, err := countDue(repository.DueSoon)
+	if err != nil {
+		return TaskStats{}, err
+	}
+
+	return TaskStats{
+		Total: total, Todo: todo, InProgress: inProgress, Done: done, Archived: archived,
+		Overdue: overdue, DueToday: dueToday, DueSoon: dueSoon,
+	}, nil
+}
+
+// dueWindow resolves a semantic due bucket into [from, to) date bounds.
+// Deadlines are calendar dates; "today" is the server-local date normalized
+// to UTC midnight so comparisons are date-only.
+func dueWindow(now time.Time, bucket repository.DueBucket) (from, to *time.Time, err error) {
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	tomorrow := today.AddDate(0, 0, 1)
+	switch bucket {
+	case repository.DueOverdue:
+		return nil, &today, nil
+	case repository.DueToday:
+		return &today, &tomorrow, nil
+	case repository.DueSoon:
+		soonEnd := today.AddDate(0, 0, 8)
+		return &tomorrow, &soonEnd, nil
+	default:
+		return nil, nil, domain.Invalid("invalid due filter " + string(bucket))
+	}
 }
 
 // ---- Users (phase 5 of docs/auth-plan.md) ----

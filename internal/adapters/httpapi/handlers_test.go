@@ -696,3 +696,101 @@ func TestHTTPTaskOwnershipScoped(t *testing.T) {
 	}
 	_ = ctx
 }
+
+// ---- Release 1: due filters, sorting, reopen, stats ----
+
+func TestHTTPDueFiltersSortingAndReopen(t *testing.T) {
+	r := newTestEngine(t)
+	seed := []string{
+		`{"title":"Beta","priority":1,"deadline":"2026-08-24"}`,
+		`{"title":"alpha","priority":3,"deadline":"2026-08-25"}`,
+		`{"title":"Gamma","priority":2,"deadline":"2026-08-26"}`,
+		`{"title":"No date","priority":1}`,
+	}
+	for _, body := range seed {
+		w := do(t, r, "POST", "/api/tasks", body)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("seed %s status = %d; body=%s", body, w.Code, w.Body.String())
+		}
+	}
+
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{"/api/tasks?due=overdue", []string{"Beta"}},
+		{"/api/tasks?due=today", []string{"alpha"}},
+		{"/api/tasks?due=soon", []string{"Gamma"}},
+	} {
+		w := do(t, r, "GET", tc.path, "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status = %d; body=%s", tc.path, w.Code, w.Body.String())
+		}
+		var resp httpapi.ListResponse
+		decodeBody(t, w, &resp)
+		got := make([]string, 0, len(resp.Tasks))
+		for _, task := range resp.Tasks {
+			got = append(got, task.Title)
+		}
+		if len(got) != len(tc.want) || got[0] != tc.want[0] {
+			t.Errorf("%s titles = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+
+	w := do(t, r, "GET", "/api/tasks?sort=title&order=asc", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("sort status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var sorted httpapi.ListResponse
+	decodeBody(t, w, &sorted)
+	titles := make([]string, 0, len(sorted.Tasks))
+	for _, task := range sorted.Tasks {
+		titles = append(titles, task.Title)
+	}
+	wantTitles := []string{"alpha", "Beta", "Gamma", "No date"}
+	for i, want := range wantTitles {
+		if titles[i] != want {
+			t.Fatalf("sorted titles = %v, want %v", titles, wantTitles)
+		}
+	}
+
+	// Reopen the completed alpha task through the API.
+	do(t, r, "PATCH", "/api/tasks/id-002", `{"status":"in_progress"}`)
+	if w := do(t, r, "PATCH", "/api/tasks/id-002", `{"status":"done"}`); w.Code != http.StatusOK {
+		t.Fatalf("complete status = %d; body=%s", w.Code, w.Body.String())
+	}
+	w = do(t, r, "PATCH", "/api/tasks/id-002", `{"status":"in_progress"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reopen status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var reopened httpapi.TaskResponse
+	decodeBody(t, w, &reopened)
+	if reopened.Status != "in_progress" {
+		t.Errorf("reopened status = %q, want in_progress", reopened.Status)
+	}
+
+	w = do(t, r, "GET", "/api/stats", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("stats status = %d; body=%s", w.Code, w.Body.String())
+	}
+	var stats httpapi.StatsResponse
+	decodeBody(t, w, &stats)
+	if stats.Overdue != 1 || stats.DueToday != 1 || stats.DueSoon != 1 {
+		t.Errorf("due stats = overdue:%d today:%d soon:%d, want 1/1/1",
+			stats.Overdue, stats.DueToday, stats.DueSoon)
+	}
+}
+
+func TestHTTPInvalidDueSortOrder(t *testing.T) {
+	r := newTestEngine(t)
+	for _, path := range []string{
+		"/api/tasks?due=bogus",
+		"/api/tasks?sort=bogus",
+		"/api/tasks?order=bogus",
+	} {
+		w := do(t, r, "GET", path, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400; body=%s", path, w.Code, w.Body.String())
+		}
+	}
+}

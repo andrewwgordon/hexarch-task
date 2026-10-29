@@ -82,6 +82,9 @@ type StatsResponse struct {
 	InProgress int `json:"in_progress"`
 	Done       int `json:"done"`
 	Archived   int `json:"archived"`
+	Overdue    int `json:"overdue"`
+	DueToday   int `json:"due_today"`
+	DueSoon    int `json:"due_soon"`
 }
 
 // ErrorResponse is the consistent error envelope.
@@ -153,5 +156,8 @@ func toStatsResponse(s application.TaskStats) StatsResponse {
 		InProgress: s.InProgress,
 		Done:       s.Done,
 		Archived:   s.Archived,
+		Overdue:    s.Overdue,
+		DueToday:   s.DueToday,
+		DueSoon:    s.DueSoon,
 	}
 }

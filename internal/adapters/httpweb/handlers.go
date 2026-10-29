@@ -454,6 +454,15 @@ func listURL(c *gin.Context) string {
 	if s := c.Query("search"); s != "" {
 		q.Set("search", s)
 	}
+	if s := c.Query("due"); s != "" {
+		q.Set("due", s)
+	}
+	if s := c.Query("sort"); s != "" {
+		q.Set("sort", s)
+	}
+	if s := c.Query("order"); s != "" {
+		q.Set("order", s)
+	}
 	if len(q) == 0 {
 		return "/app/"
 	}

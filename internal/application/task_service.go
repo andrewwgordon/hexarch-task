@@ -52,9 +52,12 @@ type UpdateUserInput struct {
 	IsAdmin  *bool   // nil = unchanged
 }
 
-// TaskStats is a small reporting value object.
+// TaskStats is a small reporting value object. Overdue/DueToday/DueSoon are
+// active-only due counters (todo + in_progress) and are independent of the
+// current list filter, matching the stats strip's overall behavior.
 type TaskStats struct {
 	Total, Todo, InProgress, Done, Archived int
+	Overdue, DueToday, DueSoon              int
 }
 
 // Caller is the authenticated identity performing a task operation. Task

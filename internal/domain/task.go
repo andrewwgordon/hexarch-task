@@ -48,8 +48,10 @@ func (s Status) String() string { return string(s) }
 var allowedTransitions = map[Status][]Status{
 	StatusTodo:       {StatusInProgress},
 	StatusInProgress: {StatusTodo, StatusDone},
-	StatusDone:       {StatusArchived},
-	StatusArchived:   {},
+	// Reopen: a completed task can return to active work. Archived remains
+	// terminal; done -> todo is intentionally not allowed.
+	StatusDone:     {StatusArchived, StatusInProgress},
+	StatusArchived: {},
 }
 
 const (

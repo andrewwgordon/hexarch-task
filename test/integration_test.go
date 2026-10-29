@@ -155,8 +155,30 @@ func TestIntegrationFullParity(t *testing.T) {
 		t.Fatalf("done status = %d, body=%s", code, body)
 	}
 
-	if code, body, _ := doJSON("GET", base+"/api/stats", ""); code != http.StatusOK {
-		t.Fatalf("stats status = %d, body=%s", code, body)
+	// Release 1: a completed task can be reopened.
+	if code, body, _ := doJSON("PATCH", base+"/api/tasks/"+id, `{"status":"in_progress"}`); code != http.StatusOK {
+		t.Fatalf("reopen status = %d, body=%s", code, body)
+	}
+
+	// Release 1: due/sort query parameters are accepted end to end.
+	if code, body, _ := doJSON("GET", base+"/api/tasks?sort=deadline&order=asc", ""); code != http.StatusOK {
+		t.Fatalf("sorted list status = %d, body=%s", code, body)
+	}
+
+	code, statsBody, _ := doJSON("GET", base+"/api/stats", "")
+	if code != http.StatusOK {
+		t.Fatalf("stats status = %d, body=%s", code, statsBody)
+	}
+	var stats struct {
+		Overdue  *int `json:"overdue"`
+		DueToday *int `json:"due_today"`
+		DueSoon  *int `json:"due_soon"`
+	}
+	if err := json.Unmarshal(statsBody, &stats); err != nil {
+		t.Fatalf("stats decode: %v", err)
+	}
+	if stats.Overdue == nil || stats.DueToday == nil || stats.DueSoon == nil {
+		t.Fatalf("stats missing due fields: %s", statsBody)
 	}
 
 	if code, _, _ := doJSON("DELETE", base+"/api/tasks/"+id, ""); code != http.StatusNoContent {

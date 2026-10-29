@@ -7,8 +7,8 @@
 // This file (httpconv.go) is the whole package.
 //
 // Public API:
-//   - Functions: ParseDeadline, ParseStatus, StatusForKind,
-//     ExtractStatusAndMessage
+//   - Functions: ParseDeadline, ParseStatus, ParseDue, ParseSort,
+//     ParseSortOrder, StatusForKind, ExtractStatusAndMessage
 //
 // Private:
 //   - deadlineLayout
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"hexarch/internal/domain"
+	"hexarch/internal/repository"
 )
 
 // deadlineLayout is the single accepted date format for deadlines, used by
@@ -45,6 +46,49 @@ func ParseStatus(s string) (domain.Status, error) {
 		return domain.Status(s), nil
 	default:
 		return "", domain.Invalid(fmt.Sprintf("invalid status %q (want todo|in_progress|done|archived)", s))
+	}
+}
+
+// ParseDue converts a due-filter token into a repository.DueBucket. An empty
+// string returns the zero value and no error.
+func ParseDue(s string) (repository.DueBucket, error) {
+	if s == "" {
+		return "", nil
+	}
+	switch repository.DueBucket(s) {
+	case repository.DueOverdue, repository.DueToday, repository.DueSoon:
+		return repository.DueBucket(s), nil
+	default:
+		return "", domain.Invalid(fmt.Sprintf("invalid due filter %q (want overdue|today|soon)", s))
+	}
+}
+
+// ParseSort converts a sort token into a repository.SortField. An empty string
+// returns the zero value and no error.
+func ParseSort(s string) (repository.SortField, error) {
+	if s == "" {
+		return "", nil
+	}
+	switch repository.SortField(s) {
+	case repository.SortPriority, repository.SortCreated, repository.SortUpdated,
+		repository.SortDeadline, repository.SortTitle:
+		return repository.SortField(s), nil
+	default:
+		return "", domain.Invalid(fmt.Sprintf("invalid sort %q (want priority|created|updated|deadline|title)", s))
+	}
+}
+
+// ParseSortOrder converts an order token into a repository.SortOrder. An
+// empty string returns the zero value and no error.
+func ParseSortOrder(s string) (repository.SortOrder, error) {
+	if s == "" {
+		return "", nil
+	}
+	switch repository.SortOrder(s) {
+	case repository.SortAsc, repository.SortDesc:
+		return repository.SortOrder(s), nil
+	default:
+		return "", domain.Invalid(fmt.Sprintf("invalid sort order %q (want asc|desc)", s))
 	}
 }
 

@@ -19,18 +19,103 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"hexarch/internal/domain"
 )
 
+// DueBucket is the semantic due-date filter vocabulary shared by adapters.
+// The application resolves it into absolute DeadlineFrom/DeadlineTo bounds so
+// repositories never depend on the wall clock or a timezone.
+type DueBucket string
+
+const (
+	DueOverdue DueBucket = "overdue"
+	DueToday   DueBucket = "today"
+	DueSoon    DueBucket = "soon"
+)
+
+// SortField is the list-sort vocabulary shared by adapters.
+type SortField string
+
+const (
+	SortPriority SortField = "priority"
+	SortCreated  SortField = "created"
+	SortUpdated  SortField = "updated"
+	SortDeadline SortField = "deadline"
+	SortTitle    SortField = "title"
+)
+
+// SortOrder is the list-sort direction.
+type SortOrder string
+
+const (
+	SortAsc  SortOrder = "asc"
+	SortDesc SortOrder = "desc"
+)
+
 // TaskFilter is a value object describing how to narrow a list query.
 // UserID scopes the query to one owner; nil means "all users" (admin scope).
+//
+// Due is semantic and is resolved by the application into DeadlineFrom and
+// DeadlineTo. Statuses is used when Status is nil (for example active-only due
+// queries). If both Status and Statuses are set, Status takes precedence.
 type TaskFilter struct {
-	UserID *domain.UserID
-	Status *domain.Status
-	Search string
+	UserID   *domain.UserID
+	Status   *domain.Status
+	Statuses []domain.Status
+	Search   string
+
+	Due          *DueBucket
+	DeadlineFrom *time.Time // inclusive, resolved by the application
+	DeadlineTo   *time.Time // exclusive, resolved by the application
+
+	Sort  SortField
+	Order SortOrder
+
 	Limit  int
 	Offset int
+}
+
+// Validate rejects unknown due/sort/order tokens. Adapters parse input into
+// these types, but the application validates defensively before querying.
+func (f TaskFilter) Validate() error {
+	if f.Due != nil {
+		switch *f.Due {
+		case DueOverdue, DueToday, DueSoon:
+		default:
+			return domain.Invalid("invalid due filter " + string(*f.Due) + " (want overdue|today|soon)")
+		}
+	}
+	switch f.Sort {
+	case "", SortPriority, SortCreated, SortUpdated, SortDeadline, SortTitle:
+	default:
+		return domain.Invalid("invalid sort " + string(f.Sort) + " (want priority|created|updated|deadline|title)")
+	}
+	switch f.Order {
+	case "", SortAsc, SortDesc:
+	default:
+		return domain.Invalid("invalid sort order " + string(f.Order) + " (want asc|desc)")
+	}
+	return nil
+}
+
+// EffectiveSort applies the documented defaults. An explicit order is always
+// honored; otherwise date/priority sorts default to desc and title to asc.
+func (f TaskFilter) EffectiveSort() (SortField, SortOrder) {
+	sort := f.Sort
+	if sort == "" {
+		sort = SortPriority
+	}
+	order := f.Order
+	if order == "" {
+		if sort == SortTitle {
+			order = SortAsc
+		} else {
+			order = SortDesc
+		}
+	}
+	return sort, order
 }
 
 // DefaultTaskFilter returns the standard filter: every task, no offset, at
@@ -47,14 +132,15 @@ type TaskRepository interface {
 	Create(ctx context.Context, task domain.Task) error
 	// ByID returns the task or a NotFound error.
 	ByID(ctx context.Context, id domain.TaskID) (domain.Task, error)
-	// List returns tasks ordered by (priority desc, created_at desc),
-	// with the given paging and filters.
+	// List returns tasks matching the filter, using the filter's effective
+	// sort/order and paging. With no sort/order it preserves the default
+	// priority desc, created_at desc ordering.
 	List(ctx context.Context, filter TaskFilter) ([]domain.Task, error)
-	// Count returns the total number of tasks, honoring the filter's UserID
-	// scope (nil = all users, admin scope).
+	// Count returns the number of tasks matching every filter field except
+	// paging and sorting. UserID nil means "all users" (admin scope).
 	Count(ctx context.Context, f TaskFilter) (int, error)
 	// CountByStatus returns the number of tasks in a given status, honoring
-	// the filter's UserID scope (nil = all users, admin scope).
+	// the same filter fields as Count.
 	CountByStatus(ctx context.Context, status domain.Status, f TaskFilter) (int, error)
 	// Update persists all mutable fields of an existing task.
 	Update(ctx context.Context, task domain.Task) error

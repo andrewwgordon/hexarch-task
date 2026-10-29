@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"hexarch/internal/adapters/cli"
 	"hexarch/internal/application"
@@ -192,4 +193,72 @@ func mustAdmin(t *testing.T, svc application.TaskService) domain.User {
 		t.Fatalf("admin auth: %v", err)
 	}
 	return u
+}
+
+// ---- Release 1: reopen, due filters, sorting, due stats ----
+
+func TestCLIReopenDueAndSort(t *testing.T) {
+	ctx := context.Background()
+	app := newApp(t)
+	auth := []string{"--email", "admin@email.com", "--password", "admin"}
+	today := time.Now()
+	deadlines := map[string]string{
+		"overdue": today.AddDate(0, 0, -1).Format(time.DateOnly),
+		"today":   today.Format(time.DateOnly),
+		"soon":    today.AddDate(0, 0, 2).Format(time.DateOnly),
+	}
+	for title, deadline := range deadlines {
+		args := append([]string{"create"}, auth...)
+		args = append(args, "--title", title, "--deadline", deadline)
+		out := runCLICapture(t, app, args)
+		if !strings.Contains(out, "created") {
+			t.Fatalf("create %s = %q", title, out)
+		}
+	}
+
+	out := runCLICapture(t, app, append([]string{"list"}, append(auth, "--due", "overdue")...))
+	if !strings.Contains(out, "overdue") || strings.Contains(out, "today") {
+		t.Errorf("list --due overdue = %q", out)
+	}
+	out = runCLICapture(t, app, append([]string{"list"}, append(auth, "--sort", "title", "--order", "asc")...))
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], "overdue") {
+		t.Errorf("title sort output = %q", out)
+	}
+
+	// Create, complete, then reopen.
+	out = runCLICapture(t, app, append([]string{"create"}, append(auth, "--title", "reopen me")...))
+	id := strings.Fields(out)[1]
+	id = strings.TrimSuffix(id, ":")
+	if err := app.Run(ctx, append([]string{"start"}, append(auth, id)...)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := app.Run(ctx, append([]string{"done"}, append(auth, id)...)); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	out = runCLICapture(t, app, append([]string{"reopen"}, append(auth, id)...))
+	if !strings.Contains(out, "in_progress") {
+		t.Errorf("reopen output = %q, want in_progress", out)
+	}
+
+	out = runCLICapture(t, app, append([]string{"stats"}, auth...))
+	for _, want := range []string{"overdue:", "due today:", "due soon:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stats missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestCLIInvalidDueSortOrder(t *testing.T) {
+	app := newApp(t)
+	auth := []string{"--email", "admin@email.com", "--password", "admin"}
+	for _, args := range [][]string{
+		append([]string{"list"}, append(auth, "--due", "bogus")...),
+		append([]string{"list"}, append(auth, "--sort", "bogus")...),
+		append([]string{"list"}, append(auth, "--order", "bogus")...),
+	} {
+		if err := app.Run(context.Background(), args); err == nil {
+			t.Errorf("expected error for %v", args)
+		}
+	}
 }

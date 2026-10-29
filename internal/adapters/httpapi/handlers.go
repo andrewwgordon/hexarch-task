@@ -254,6 +254,21 @@ func filterFromQuery(c *gin.Context) (repository.TaskFilter, error) {
 		f.Status = &st
 	}
 	f.Search = c.Query("search")
+	if due, err := httpconv.ParseDue(c.Query("due")); err != nil {
+		return repository.TaskFilter{}, err
+	} else if due != "" {
+		f.Due = &due
+	}
+	if sortField, err := httpconv.ParseSort(c.Query("sort")); err != nil {
+		return repository.TaskFilter{}, err
+	} else {
+		f.Sort = sortField
+	}
+	if order, err := httpconv.ParseSortOrder(c.Query("order")); err != nil {
+		return repository.TaskFilter{}, err
+	} else {
+		f.Order = order
+	}
 	if v := c.Query("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {

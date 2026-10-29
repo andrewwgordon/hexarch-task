@@ -363,3 +363,120 @@ func TestServiceUpdateUserPasswordRehash(t *testing.T) {
 		t.Error("old password still accepted after rehash")
 	}
 }
+
+// ---- Release 1: due filters, stats, and sorting ----
+
+func TestServiceDueFiltersAndStats(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	repo := memory.NewTaskRepositoryMem()
+	var seq int
+	svc := application.NewTaskServiceWith(
+		repo,
+		func() (domain.TaskID, error) {
+			seq++
+			return domain.TaskID("due-" + string(rune('a'+seq-1))), nil
+		},
+		func() time.Time { return now },
+	)
+	admin, err := svc.AuthUser(ctx, "admin@email.com", "admin")
+	if err != nil {
+		t.Fatalf("admin auth: %v", err)
+	}
+	caller := application.CallerOf(admin)
+	today := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+	mk := func(title string, deadline *time.Time) domain.Task {
+		task, err := svc.CreateTask(ctx, application.CreateTaskInput{
+			UserID: admin.ID(), Title: title, Deadline: deadline,
+		})
+		if err != nil {
+			t.Fatalf("CreateTask(%s): %v", title, err)
+		}
+		return task
+	}
+	yesterday := today.AddDate(0, 0, -1)
+	soon := today.AddDate(0, 0, 2)
+	later := today.AddDate(0, 0, 10)
+	mk("overdue", &yesterday)
+	todayTask := mk("today", &today)
+	mk("soon", &soon)
+	mk("later", &later)
+	mk("none", nil)
+
+	overdue := repository.DueOverdue
+	got, err := svc.ListTasks(ctx, repository.TaskFilter{Due: &overdue})
+	if err != nil {
+		t.Fatalf("List overdue: %v", err)
+	}
+	if len(got) != 1 || got[0].Title() != "overdue" {
+		t.Fatalf("overdue list = %+v, want only overdue", got)
+	}
+	dueToday := repository.DueToday
+	got, err = svc.ListTasks(ctx, repository.TaskFilter{Due: &dueToday})
+	if err != nil {
+		t.Fatalf("List today: %v", err)
+	}
+	if len(got) != 1 || got[0].Title() != "today" {
+		t.Fatalf("today list = %+v, want only today", got)
+	}
+	dueSoon := repository.DueSoon
+	got, err = svc.ListTasks(ctx, repository.TaskFilter{Due: &dueSoon})
+	if err != nil {
+		t.Fatalf("List soon: %v", err)
+	}
+	if len(got) != 1 || got[0].Title() != "soon" {
+		t.Fatalf("soon list = %+v, want only soon", got)
+	}
+
+	// Completing the today task removes it from active due filters.
+	if _, err := svc.ChangeStatus(ctx, todayTask.ID(), domain.StatusInProgress, caller); err != nil {
+		t.Fatalf("start today: %v", err)
+	}
+	if _, err := svc.ChangeStatus(ctx, todayTask.ID(), domain.StatusDone, caller); err != nil {
+		t.Fatalf("complete today: %v", err)
+	}
+	got, err = svc.ListTasks(ctx, repository.TaskFilter{Due: &dueToday})
+	if err != nil {
+		t.Fatalf("List today after done: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("active due-today list = %+v, want empty", got)
+	}
+	// Explicit status overrides the active-only default.
+	done := domain.StatusDone
+	got, err = svc.ListTasks(ctx, repository.TaskFilter{Due: &dueToday, Status: &done})
+	if err != nil {
+		t.Fatalf("List done today: %v", err)
+	}
+	if len(got) != 1 || got[0].ID() != todayTask.ID() {
+		t.Fatalf("done due-today list = %+v, want today task", got)
+	}
+
+	stats, err := svc.Stats(ctx, repository.TaskFilter{})
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Overdue != 1 || stats.DueToday != 0 || stats.DueSoon != 1 {
+		t.Errorf("due stats = overdue:%d today:%d soon:%d, want 1/0/1",
+			stats.Overdue, stats.DueToday, stats.DueSoon)
+	}
+	if stats.Total != 5 || stats.Done != 1 {
+		t.Errorf("overall stats = total:%d done:%d, want 5/1", stats.Total, stats.Done)
+	}
+}
+
+func TestServiceRejectsInvalidSort(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewTaskRepositoryMem()
+	svc := application.NewTaskServiceWith(repo,
+		func() (domain.TaskID, error) { return "id", nil },
+		func() time.Time { return time.Now() })
+	_, err := svc.ListTasks(ctx, repository.TaskFilter{Sort: repository.SortField("bogus")})
+	if err == nil {
+		t.Fatal("expected invalid sort error")
+	}
+	de, ok := err.(*domain.DomainError)
+	if !ok || de.Kind() != domain.KindInvalid {
+		t.Fatalf("error = %v, want INVALID_ARGUMENT", err)
+	}
+}
